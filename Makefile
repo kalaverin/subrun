@@ -8,16 +8,9 @@ env:
 build:
 	@mkdir bin/ || true
 	@nimble refresh --verbose
-	@nim c \
-	-d:danger \
-		--mm:arc \
-		--opt:speed \
-		--passC:-flto \
-		--passL:-flto \
-		--passL:-s \
-		--nimblePath:$(NIMBLE_DIR)/pkgs2 \
-		-o:bin/subrun \
-		src/subrun.nim
+	@nimble build --verbose
+	@rm bin/subrun || true
+	@mv subrun bin/
 
 install:
 	@make build
