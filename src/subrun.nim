@@ -767,7 +767,7 @@ proc run(
     graceTimeout: float = DefaultGraceTimeout,
     hardTimeout: float = DefaultHardTimeout,
     cwd: string = "",
-    logDir: string = "var/subrunner/log",
+    logDir: string = "var/log/subrun",
     env: seq[string] = @[],
     verbose: bool = false,
     command: seq[string]
