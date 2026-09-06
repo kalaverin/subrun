@@ -1,0 +1,10 @@
+.*
+*.md
+
+bin/
+var/
+
+!.env
+!.envrc
+!.gitattributes
+!.gitignore
