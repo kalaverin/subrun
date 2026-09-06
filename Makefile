@@ -15,6 +15,7 @@ build:
 		--passC:-flto \
 		--passL:-flto \
 		--passL:-s \
+		--nimblePath:$(NIMBLE_DIR)/pkgs2 \
 		-o:bin/subrun \
 		src/subrun.nim
 
