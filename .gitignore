@@ -8,3 +8,6 @@ var/
 !.envrc
 !.gitattributes
 !.gitignore
+nimble.develop
+nimble.paths
+nimbledeps

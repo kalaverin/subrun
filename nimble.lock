@@ -1,14 +1,14 @@
 {
   "version": 2,
   "packages": {
-    "nim": {
-      "version": "2.2.10",
-      "vcsRevision": "9fe2137fa2f3f66cf5a44f357d461829ac9e20c4",
-      "url": "https://github.com/nim-lang/Nim.git",
+    "results": {
+      "version": "0.5.1",
+      "vcsRevision": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
+      "url": "https://github.com/arnetheduck/nim-results",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "17ec440fdb89f8903db29a17898af590087d2b64"
+        "sha1": "a9c011f74bc9ed5c91103917b9f382b12e82a9e7"
       }
     },
     "unittest2": {
@@ -16,35 +16,9 @@
       "vcsRevision": "26f2ef3ae0ec72a2a75bfe557e02e88f6a31c189",
       "url": "https://github.com/status-im/nim-unittest2",
       "downloadMethod": "git",
-      "dependencies": [
-        "nim"
-      ],
+      "dependencies": [],
       "checksums": {
         "sha1": "02bb3751ba9ddc3c17bfd89f2e41cb6bfb8fc0c9"
-      }
-    },
-    "cligen": {
-      "version": "1.11.0",
-      "vcsRevision": "bdce5ed5ae8b222321945648b30c39fbc2bed272",
-      "url": "https://github.com/c-blake/cligen.git",
-      "downloadMethod": "git",
-      "dependencies": [
-        "nim"
-      ],
-      "checksums": {
-        "sha1": "7ab5190b7ea21aab752bcd03f2ca2b71b048ec4f"
-      }
-    },
-    "results": {
-      "version": "0.5.1",
-      "vcsRevision": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
-      "url": "https://github.com/arnetheduck/nim-results",
-      "downloadMethod": "git",
-      "dependencies": [
-        "nim"
-      ],
-      "checksums": {
-        "sha1": "a9c011f74bc9ed5c91103917b9f382b12e82a9e7"
       }
     },
     "stew": {
@@ -53,26 +27,11 @@
       "url": "https://github.com/status-im/nim-stew",
       "downloadMethod": "git",
       "dependencies": [
-        "nim",
         "results",
         "unittest2"
       ],
       "checksums": {
         "sha1": "02c533a9a3cae4ef9e3969ca0d85374b254f021a"
-      }
-    },
-    "testutils": {
-      "version": "0.8.3",
-      "vcsRevision": "3feb84e206660d5289caefbe7b0f66f97d9ec084",
-      "url": "https://github.com/status-im/nim-testutils",
-      "downloadMethod": "git",
-      "dependencies": [
-        "nim",
-        "stew",
-        "unittest2"
-      ],
-      "checksums": {
-        "sha1": "2aeb2136828691761eb16c73a050938f53477458"
       }
     },
     "faststreams": {
@@ -81,7 +40,6 @@
       "url": "https://github.com/status-im/nim-faststreams",
       "downloadMethod": "git",
       "dependencies": [
-        "nim",
         "stew",
         "unittest2"
       ],
@@ -95,7 +53,6 @@
       "url": "https://github.com/status-im/nim-serialization",
       "downloadMethod": "git",
       "dependencies": [
-        "nim",
         "faststreams",
         "stew",
         "unittest2"
@@ -110,7 +67,6 @@
       "url": "https://github.com/status-im/nim-json-serialization",
       "downloadMethod": "git",
       "dependencies": [
-        "nim",
         "faststreams",
         "results",
         "serialization",
@@ -120,13 +76,25 @@
         "sha1": "d0c27756fdbdf3a83739ba6c0575234755ad8afc"
       }
     },
+    "testutils": {
+      "version": "0.8.3",
+      "vcsRevision": "3feb84e206660d5289caefbe7b0f66f97d9ec084",
+      "url": "https://github.com/status-im/nim-testutils",
+      "downloadMethod": "git",
+      "dependencies": [
+        "stew",
+        "unittest2"
+      ],
+      "checksums": {
+        "sha1": "2aeb2136828691761eb16c73a050938f53477458"
+      }
+    },
     "chronicles": {
       "version": "0.12.4",
       "vcsRevision": "45c823b8af409f82fa35fd5e1f6a7c9a06fe3137",
       "url": "https://github.com/status-im/nim-chronicles",
       "downloadMethod": "git",
       "dependencies": [
-        "nim",
         "faststreams",
         "serialization",
         "json_serialization",
@@ -134,6 +102,16 @@
       ],
       "checksums": {
         "sha1": "fcc95d4ff52d5e4288a6549331c25a299d56f5c0"
+      }
+    },
+    "cligen": {
+      "version": "1.11.0",
+      "vcsRevision": "bdce5ed5ae8b222321945648b30c39fbc2bed272",
+      "url": "https://github.com/c-blake/cligen.git",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "7ab5190b7ea21aab752bcd03f2ca2b71b048ec4f"
       }
     }
   },
