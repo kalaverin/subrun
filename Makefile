@@ -8,9 +8,15 @@ env:
 build:
 	@mkdir bin/ || true
 	@nimble refresh --verbose
-	@nimble build --verbose
-	@rm bin/subrun || true
-	@mv subrun bin/
+	@nim c \
+	-d:danger \
+		--mm:arc \
+		--opt:speed \
+		--passC:-flto \
+		--passL:-flto \
+		--passL:-s \
+		-o:bin/subrun \
+		src/subrun.nim
 
 install:
 	@make build
