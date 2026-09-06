@@ -1,5 +1,10 @@
 .PHONY: build install
 
+env:
+	@direnv allow . || true
+	@mise trust --yes mise.toml
+	@mise install
+
 build:
 	@mkdir bin/ || true
 	@nimble refresh --verbose
@@ -8,9 +13,6 @@ build:
 	@mv subrun bin/
 
 install:
-	@direnv allow . || true
-	@mise trust --yes mise.toml
-	@mise install
 	@make build
 	@mkdir -p ${HOME}/.local/bin
 	@rm "${HOME}/.local/bin/subrun" || true
