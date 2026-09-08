@@ -8,7 +8,8 @@
 import
   std/[posix, os, oserrors, monotimes, times, strutils, tables],
   pkg/chronicles,
-  pkg/cligen
+  pkg/cligen,
+  tort/tort
 
 # All wrapper logs go to stderr — stdout is the guest's data channel
 # (MCP JSON-RPC), it must stay clean (S1.5, J4).
@@ -143,6 +144,7 @@ type
     env: seq[(string, string)]
     verbose: bool
     debugMode: bool       # derived once at startup (S5.5)
+    tort: bool            # --tort: guest stdout through TortFilter (one-way)
 
   Logger = object
     enabled: bool
@@ -166,6 +168,7 @@ type
     logger: Logger
     logSessionCounter: int
     lastActivity: MonoTime
+    tortFilter: TortFilter  # live only when cfg.tort; zero-value otherwise
 
 # -----------------------------------------------------------------------------
 # Low-level fd helpers
@@ -576,6 +579,27 @@ proc appendCompact(s: var Stream, data: pointer, len: int) =
   s.buf.setLen(oldLen + len)
   copyMem(addr s.buf[oldLen], data, len)
 
+proc tortFeed(r: var Runner; s: ptr Stream; data: openArray[byte]) =
+  ## One-way stdout filter with the R3 recovery: a TortError (OOM-class)
+  ## never kills the session — log, drain the filter verbatim, reinit,
+  ## continue.  The failed chunk is already inside the filter buffer
+  ## (feed adds before pumpBuf), so the verbatim drain covers it.
+  var cs = newString(data.len)
+  copyMem(addr cs[0], unsafeAddr data[0], data.len)
+  try:
+    let filtered = r.tortFilter.feed(cs)
+    if filtered.len > 0:
+      appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+  except TortError as e:
+    error "Tort filter failed, draining and reinitializing", error = e.msg
+    try:
+      let tail = r.tortFilter.finish()
+      if tail.len > 0:
+        appendCompact(s[], unsafeAddr tail[0], tail.len)
+    except TortError:
+      discard                         # repeat OOM: the tail is dropped (accepted)
+    r.tortFilter = initTortFilter()   # fresh split state; the filter stays on
+
 proc closeHostFd(fd: cint) =
   restoreOneFdFlag(fd)
   closeFd(fd)
@@ -631,6 +655,18 @@ proc onSourceEof(r: var Runner, kind: FdKind) =
     s.readOff = 0
     s.state = ssClosed
   else:
+    if kind == fkStdout and r.cfg.tort:
+      try:
+        let filtered = r.tortFilter.finish()
+        if filtered.len > 0:
+          appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+      except TortError as e:
+        error "Tort filter finish failed, tail dropped", error = e.msg
+      ## Emitted HERE, not in finalize: S1.3 closes our own fd 1/2 after the
+      ## drain, so by finalize time stderr writes are already lost.
+      let st = r.tortFilter.stats
+      info "Tort filter stats", docsEmitted = st.docsEmitted,
+           junkChunks = st.junkChunks, docsFailed = st.docsFailed
     s.state = ssDraining
     tryFlush(r, kind)
 
@@ -643,7 +679,10 @@ proc pumpRead(r: var Runner, kind: FdKind) =
   while n < 0 and errno == EINTR:
     n = posix.read(s.srcFd, addr chunk[0], ReadChunk)   # S6.3: retry
   if n > 0:
-    appendCompact(s[], addr chunk[0], int(n))
+    if kind == fkStdout and r.cfg.tort:
+      tortFeed(r, s, chunk[0 ..< int(n)])
+    else:
+      appendCompact(s[], addr chunk[0], int(n))
     tryFlush(r, kind)
   elif n == 0:
     onSourceEof(r, kind)
@@ -770,6 +809,7 @@ proc run(
     logDir: string = "var/log/subrun",
     env: seq[string] = @[],
     verbose: bool = false,
+    tort: bool = false,
     command: seq[string]
 ): int =
   ## Run a guest process with byte-exact stdio proxying and bounded,
@@ -808,6 +848,7 @@ proc run(
     env: envOverrides,
     verbose: verbose,
     debugMode: detectDebugMode(),
+    tort: tort,
   )
   if not dirExists(cfg.cwd):
     error "CWD does not exist", cwd = cfg.cwd
@@ -823,7 +864,8 @@ proc run(
     # Env values are never logged (S4.3).
     info "Config", binary = cfg.binary, args = cfg.args, cwd = cfg.cwd,
          logDir = cfg.logDir, debugMode = cfg.debugMode,
-         graceTimeout = cfg.graceTimeout, hardTimeout = cfg.hardTimeout
+         graceTimeout = cfg.graceTimeout, hardTimeout = cfg.hardTimeout,
+         tort = cfg.tort
 
   saveFdFlags()
   for fd in 0..2:
@@ -844,6 +886,8 @@ proc run(
   # pre-exec window.  A host signal landing in this microsecond window kills
   # us by default disposition — the guest is still covered (pdeathsig/EOF).
   var r = Runner(cfg: cfg, hostPid: getppid())
+  if cfg.tort:
+    r.tortFilter = initTortFilter()   # one-way, junk verbatim, 256 KiB cap
   try:
     r.guestPid = spawnGuest(cfg, pipes)
   except CatchableError as ex:
@@ -869,6 +913,7 @@ const
     "logDir": "Directory for session/operational logs, resolved against the invocation cwd",
     "env": "Environment variable KEY=VALUE (repeatable, overrides inherited)",
     "verbose": "Log the startup config dump at info level (stderr)",
+    "tort": "Filter guest stdout through Tort (one-way, lossy: JSON docs → Tort text, junk verbatim)",
     "command": "Command and arguments to run (everything after the first non-option argument or --)",
   }.toTable
   ShortTable = {
