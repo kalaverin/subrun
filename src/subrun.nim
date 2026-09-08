@@ -8,7 +8,9 @@
 import
   std/[posix, os, oserrors, monotimes, times, strutils, tables],
   pkg/chronicles,
-  pkg/cligen
+  pkg/cligen,
+  tort/tort,
+  subrun_mcp
 
 # All wrapper logs go to stderr — stdout is the guest's data channel
 # (MCP JSON-RPC), it must stay clean (S1.5, J4).
@@ -74,6 +76,14 @@ const
   IdleThreshold1Sec = 60
   IdleThreshold2Sec = 600
 
+# Version comes from git tags at compile time: "v0.2.0" on a tag,
+# "v0.2.0-3-gabc1234" after it, bare commit hash without tags.
+# Fallback 0.0.0 when built outside the git tree. staticExec runs in the
+# compile directory (project root under nimble/make).
+const Version = staticExec(
+  "git describe --tags --always --dirty 2>/dev/null || echo 0.0.0").strip
+
+# -----------------------------------------------------------------------------
 # Catchable signals we handle: forward-all-catchable minus SIGPIPE (SIG_IGN)
 # and minus the synchronous fault class {SEGV, BUS, FPE, ILL, TRAP, EMT, SYS}
 # (our own crashes, not host events — default disposition kept).
@@ -131,7 +141,8 @@ type
     shsNone              # no shutdown in progress
     shsForwardedSignal   # deadly signal already delivered by forwarding —
                          # we do NOT send our own SIGTERM (no invented events)
-    shsHostDied          # ppid-poll detected host death — we SIGTERM the group
+    shsHostDied          # ppid-poll detected host death — we signal the group
+    shsTimeout           # --timeout lifetime limit expired — graceful signal
 
   Config = object
     binary: string
@@ -140,9 +151,14 @@ type
     logDir: string        # resolved absolute, anchored at invocation cwd (S4.4)
     graceTimeout: float
     hardTimeout: float
+    timeout: float           # 0.0 = unlimited guest lifetime (--timeout)
+    signal: cint             # graceful signal for wrapper-initiated shutdown
     env: seq[(string, string)]
     verbose: bool
     debugMode: bool       # derived once at startup (S5.5)
+    tort: bool            # --tort: guest stdout through TortFilter (one-way)
+    mcp: bool             # --mcp (requires --tort): MCP envelope-preserving payload filter
+    oneWay: bool          # --one-way: lossy payload encode in --mcp mode (D18+D19)
 
   Logger = object
     enabled: bool
@@ -159,6 +175,7 @@ type
     lastStatus: cint      # single writer: the reap in the loop
     shutdown: ShutdownSource
     shutdownStart: MonoTime
+    startTime: MonoTime       # runLoop entry: --timeout anchor (monotonic)
     sigkillSent: bool
     streams: array[FdKind, Stream]
     pollFds: array[6, TPollFd]     # rebuilt from live state every iteration
@@ -166,6 +183,8 @@ type
     logger: Logger
     logSessionCounter: int
     lastActivity: MonoTime
+    tortFilter: TortFilter  # live only when cfg.tort and not cfg.mcp
+    mcpFilter: McpFilter    # live only when cfg.tort and cfg.mcp
 
 # -----------------------------------------------------------------------------
 # Low-level fd helpers
@@ -265,6 +284,42 @@ proc parseEnv(s: string): (string, string) =
   if idx < 0:
     raise newException(ValueError, "invalid env format (expected KEY=VALUE): " & s)
   result = (s[0 ..< idx], s[idx + 1 .. ^1])
+
+proc parseSignal(s: string): cint =
+  ## "SIGTERM"/"TERM"/"term" or a number (1..31). Raises ValueError on
+  ## unknown names, out-of-range numbers, and uncatchable KILL/STOP — the
+  ## caller converts that into a startup error (E1) before anything spawns.
+  var name = s.strip.toUpperAscii
+  if name.startsWith("SIG"):
+    name = name[3 .. ^1]
+  if name == "HUP": return SIGHUP
+  elif name == "INT": return SIGINT
+  elif name == "QUIT": return SIGQUIT
+  elif name == "TERM": return SIGTERM
+  elif name == "USR1": return SIGUSR1
+  elif name == "USR2": return SIGUSR2
+  elif name == "PIPE": return SIGPIPE
+  elif name == "ALRM": return SIGALRM
+  elif name == "CHLD": return SIGCHLD
+  elif name == "CONT": return SIGCONT
+  elif name == "TSTP": return SIGTSTP
+  elif name == "TTIN": return SIGTTIN
+  elif name == "TTOU": return SIGTTOU
+  elif name == "URG": return SIGURG
+  elif name == "XCPU": return SIGXCPU
+  elif name == "XFSZ": return SIGXFSZ
+  elif name == "VTALRM": return SIGVTALRM
+  elif name == "PROF": return SIGPROF
+  elif name == "WINCH": return SIGWINCH
+  elif name == "IO": return SIGIO
+  else:
+    let n = parseInt(name)               # raises ValueError on garbage
+    if n < 1 or n > 31:
+      raise newException(ValueError, "signal number out of range 1..31: " & s)
+    result = cint(n)
+  if result == SIGKILL or result == SIGSTOP:
+    raise newException(ValueError,
+      "signal cannot be caught, forbidden as graceful signal: " & s)
 
 proc resolveCwd(cwd: string): string =
   ## Explicit --cwd wins; otherwise the invocation cwd is preserved.
@@ -496,9 +551,10 @@ proc beginShutdown(r: var Runner, src: ShutdownSource) =
   s.buf.setLen(0)
   s.readOff = 0
   s.state = ssClosed
-  if src == shsHostDied:
-    # Nobody else will manage the guest: the graceful signal is ours to send.
-    signalGuestGroup(r, SIGTERM)
+  if src in {shsHostDied, shsTimeout}:
+    # Nobody else will manage the guest: the graceful signal is ours to send
+    # (host died, or the --timeout lifetime limit chose it for us).
+    signalGuestGroup(r, r.cfg.signal)
 
 proc tickEscalation(r: var Runner) =
   ## V2 timeline.  Group signals only while the guest lives; the hard-timeout
@@ -523,6 +579,17 @@ proc checkHostAlive(r: var Runner) =
   if getppid() != r.hostPid:
     info "Host died (reparented)", hostPid = int(r.hostPid)
     beginShutdown(r, shsHostDied)
+
+proc checkTimeout(r: var Runner) =
+  ## Lifetime limit (--timeout): on expiry initiate the standard shutdown.
+  ## Idempotent via beginShutdown — a shutdown already in progress owns the
+  ## V2 timeline and this is a no-op.
+  if r.cfg.timeout <= 0:
+    return
+  let elapsedSec = float(inMilliseconds(getMonoTime() - r.startTime)) / 1000.0
+  if elapsedSec >= r.cfg.timeout:
+    info "Guest lifetime timeout expired", timeout = r.cfg.timeout
+    beginShutdown(r, shsTimeout)
 
 proc toggleSessionLog(r: var Runner, sig: cint) =
   ## Debug-mode only (consumed, never forwarded — stage 03.3).
@@ -576,6 +643,27 @@ proc appendCompact(s: var Stream, data: pointer, len: int) =
   s.buf.setLen(oldLen + len)
   copyMem(addr s.buf[oldLen], data, len)
 
+proc tortFeed(r: var Runner; s: ptr Stream; data: openArray[byte]) =
+  ## One-way stdout filter with the R3 recovery: a TortError (OOM-class)
+  ## never kills the session — log, drain the filter verbatim, reinit,
+  ## continue.  The failed chunk is already inside the filter buffer
+  ## (feed adds before pumpBuf), so the verbatim drain covers it.
+  var cs = newString(data.len)
+  copyMem(addr cs[0], unsafeAddr data[0], data.len)
+  try:
+    let filtered = r.tortFilter.feed(cs)
+    if filtered.len > 0:
+      appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+  except TortError as e:
+    error "Tort filter failed, draining and reinitializing", error = e.msg
+    try:
+      let tail = r.tortFilter.finish()
+      if tail.len > 0:
+        appendCompact(s[], unsafeAddr tail[0], tail.len)
+    except TortError:
+      discard                         # repeat OOM: the tail is dropped (accepted)
+    r.tortFilter = initTortFilter()   # fresh split state; the filter stays on
+
 proc closeHostFd(fd: cint) =
   restoreOneFdFlag(fd)
   closeFd(fd)
@@ -607,6 +695,13 @@ proc tryFlush(r: var Runner, kind: FdKind) =
       continue
     elif errno == EAGAIN or errno == EWOULDBLOCK:
       break                         # wait for POLLOUT
+    elif errno == EPIPE:
+      # Downstream closed the pipe (classic `| head`): not an error for a
+      # stdio proxy — the exit code already follows the 128+SIGPIPE
+      # convention via the guest's own SIGPIPE death.
+      debug "Downstream closed the pipe, closing direction", fd = $kind
+      closeDirection(r, kind)
+      return
     else:
       error "Write error, closing direction", fd = $kind, error = $strerror(errno)
       closeDirection(r, kind)
@@ -631,6 +726,22 @@ proc onSourceEof(r: var Runner, kind: FdKind) =
     s.readOff = 0
     s.state = ssClosed
   else:
+    if kind == fkStdout and r.cfg.tort and r.cfg.mcp:
+      let tail = r.mcpFilter.drain()
+      if tail.len > 0:
+        appendCompact(s[], unsafeAddr tail[0], tail.len)
+    elif kind == fkStdout and r.cfg.tort:
+      try:
+        let filtered = r.tortFilter.finish()
+        if filtered.len > 0:
+          appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+      except TortError as e:
+        error "Tort filter finish failed, tail dropped", error = e.msg
+      ## Emitted HERE, not in finalize: S1.3 closes our own fd 1/2 after the
+      ## drain, so by finalize time stderr writes are already lost.
+      let st = r.tortFilter.stats
+      info "Tort filter stats", docsEmitted = st.docsEmitted,
+           junkChunks = st.junkChunks, docsFailed = st.docsFailed
     s.state = ssDraining
     tryFlush(r, kind)
 
@@ -643,7 +754,17 @@ proc pumpRead(r: var Runner, kind: FdKind) =
   while n < 0 and errno == EINTR:
     n = posix.read(s.srcFd, addr chunk[0], ReadChunk)   # S6.3: retry
   if n > 0:
-    appendCompact(s[], addr chunk[0], int(n))
+    if kind == fkStdout and r.cfg.tort and r.cfg.mcp:
+      # MCP mode: NDJSON line filter; a partial line may yield no bytes yet.
+      let filtered = r.mcpFilter.feedStdout(chunk[0 ..< int(n)])
+      if filtered.len > 0:
+        appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+    elif kind == fkStdout and r.cfg.tort:
+      tortFeed(r, s, chunk[0 ..< int(n)])
+    else:
+      if kind == fkStdin and r.cfg.mcp:
+        r.mcpFilter.feedStdin(chunk[0 ..< int(n)])   # tap-only, bytes unchanged
+      appendCompact(s[], addr chunk[0], int(n))
     tryFlush(r, kind)
   elif n == 0:
     onSourceEof(r, kind)
@@ -675,14 +796,24 @@ proc cadence(r: Runner): cint =
   ## Dynamic poll timeout (stage 09.6): shutdown always ticks at 100ms;
   ## steady state backs off by idle time.  Signal/guest-death latency is
   ## unaffected — EINTR and the SIGCHLD flag wake poll at any backoff.
+  ## An armed --timeout caps the backoff at the time remaining to the
+  ## deadline (1ms floor), so the lifetime limit fires on the next tick,
+  ## never one idle backoff late.
   if r.shutdown != shsNone:
     return PollMsActive
+  var ms: cint
   let idleSec = int(inSeconds(getMonoTime() - r.lastActivity))
   if idleSec >= IdleThreshold2Sec:
-    return PollMsIdle2
-  if idleSec >= IdleThreshold1Sec:
-    return PollMsIdle1
-  return PollMsActive
+    ms = PollMsIdle2
+  elif idleSec >= IdleThreshold1Sec:
+    ms = PollMsIdle1
+  else:
+    ms = PollMsActive
+  if r.cfg.timeout > 0:
+    let remainMs = int(r.cfg.timeout * 1000.0) -
+                   int(inMilliseconds(getMonoTime() - r.startTime))
+    ms = min(ms, cint(max(remainMs, 1)))
+  return ms
 
 # -----------------------------------------------------------------------------
 # Main loop & finalize
@@ -708,7 +839,10 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
   r.streams[fkStdin] = Stream(srcFd: 0, dstFd: pipes[fkStdin].w, state: ssOpen)
   r.streams[fkStdout] = Stream(srcFd: pipes[fkStdout].r, dstFd: 1, state: ssOpen)
   r.streams[fkStderr] = Stream(srcFd: pipes[fkStderr].r, dstFd: 2, state: ssOpen)
+  # (No stream-head injection: the Tort preamble lives only in --mcp mode,
+  #  inside the first transformed content[i].text — McpFilter.preambleDone.)
   r.lastActivity = getMonoTime()
+  r.startTime = getMonoTime()
 
   # Born-orphan rule (stage 19.1): hostPid==1 means the host died before our
   # first getppid() — a guest nobody manages is torn down per V2.
@@ -736,6 +870,7 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
         break
     else:
       checkHostAlive(r)
+      checkTimeout(r)
 
     let nfds = rebuildPollSet(r)
     let timeoutMs = cadence(r)
@@ -766,10 +901,15 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
 proc run(
     graceTimeout: float = DefaultGraceTimeout,
     hardTimeout: float = DefaultHardTimeout,
+    timeout: float = 0.0,
+    signal: string = "SIGTERM",
     cwd: string = "",
     logDir: string = "var/log/subrun",
     env: seq[string] = @[],
     verbose: bool = false,
+    tort: bool = false,
+    mcp: bool = false,
+    oneWay: bool = false,
     command: seq[string]
 ): int =
   ## Run a guest process with byte-exact stdio proxying and bounded,
@@ -785,6 +925,21 @@ proc run(
     stderr.writeLine("subrun: no command specified. Use -- before arguments.")
     return 2
 
+  if mcp and not tort:
+    stderr.writeLine("subrun: --mcp requires --tort (payload encoding is Tort-only)")
+    return 2
+
+  if timeout < 0:
+    stderr.writeLine("subrun: --timeout must be >= 0")
+    return 2
+
+  var gracefulSig: cint
+  try:
+    gracefulSig = parseSignal(signal)
+  except CatchableError as ex:
+    stderr.writeLine("subrun: invalid --signal: " & ex.msg)
+    return 2
+
   var envOverrides: seq[(string, string)]
   for e in env:
     try:
@@ -793,21 +948,26 @@ proc run(
       stderr.writeLine("subrun: " & ex.msg)
       return 2
 
-  let binaryPath = findExe(command[0])
+  let binaryPath = findExe(command[0], followSymlinks = false)
   if binaryPath.len == 0:
     error "Binary not found", binary = command[0]
     return 126
 
   var cfg = Config(
-    binary: expandFilename(binaryPath),
+    binary: normalizedPath(absolutePath(expandTilde(binaryPath))),
     args: command[1 .. ^1],
     cwd: resolveCwd(cwd),
     logDir: resolveLogDir(logDir),
     graceTimeout: graceTimeout,
     hardTimeout: hardTimeout,
+    timeout: timeout,
+    signal: gracefulSig,
     env: envOverrides,
     verbose: verbose,
     debugMode: detectDebugMode(),
+    tort: tort,
+    mcp: mcp,
+    oneWay: oneWay,
   )
   if not dirExists(cfg.cwd):
     error "CWD does not exist", cwd = cfg.cwd
@@ -823,7 +983,9 @@ proc run(
     # Env values are never logged (S4.3).
     info "Config", binary = cfg.binary, args = cfg.args, cwd = cfg.cwd,
          logDir = cfg.logDir, debugMode = cfg.debugMode,
-         graceTimeout = cfg.graceTimeout, hardTimeout = cfg.hardTimeout
+         graceTimeout = cfg.graceTimeout, hardTimeout = cfg.hardTimeout,
+         timeout = cfg.timeout, signal = int(cfg.signal),
+         tort = cfg.tort
 
   saveFdFlags()
   for fd in 0..2:
@@ -844,6 +1006,10 @@ proc run(
   # pre-exec window.  A host signal landing in this microsecond window kills
   # us by default disposition — the guest is still covered (pdeathsig/EOF).
   var r = Runner(cfg: cfg, hostPid: getppid())
+  if cfg.tort and cfg.mcp:
+    r.mcpFilter = initMcpFilter(oneWay = cfg.oneWay)
+  elif cfg.tort:
+    r.tortFilter = initTortFilter()   # one-way, junk verbatim, 256 KiB cap
   try:
     r.guestPid = spawnGuest(cfg, pipes)
   except CatchableError as ex:
@@ -865,10 +1031,15 @@ const
   HelpTable = {
     "graceTimeout": "Timeout for graceful shutdown (SIGTERM) before SIGKILL escalation",
     "hardTimeout": "Timeout for bounded give-up, from shutdown start",
+    "timeout": "Max guest lifetime in seconds; on expiry the graceful shutdown policy applies (0 = unlimited, default)",
+    "signal": "Graceful signal for wrapper-initiated shutdown: name (TERM, SIGHUP) or number 1..31; default SIGTERM",
     "cwd": "Working directory (default: caller's current directory)",
     "logDir": "Directory for session/operational logs, resolved against the invocation cwd",
     "env": "Environment variable KEY=VALUE (repeatable, overrides inherited)",
     "verbose": "Log the startup config dump at info level (stderr)",
+    "tort": "Filter guest stdout through Tort (one-way, lossy: JSON docs → Tort text, junk verbatim)",
+    "mcp": "MCP-proxy mode (requires --tort): JSON-RPC envelope stays valid, content[i].text payloads → Tort",
+    "oneWay": "In --mcp mode: lossy payload encode (D18+D19); default is lossless",
     "command": "Command and arguments to run (everything after the first non-option argument or --)",
   }.toTable
   ShortTable = {
@@ -882,11 +1053,12 @@ const
 # guest command, including its flags — matches Python argparse.REMAINDER and
 # the way MCP callers invoke subrun without a leading "--".
 clCfg.argEndsOpts = true
+clCfg.version = Version    # git-describe at compile time; overrides NimblePkgVersion
 
 dispatchGen(run, cmdName = "subrun", help = HelpTable, short = ShortTable,
             dispatchName = "dispatchRun")
 
-when isMainModule:
+when isMainModule and not defined(subrunTesting):
   try:
     let exitCode = dispatchRun(commandLineParams())
     if exitCode >= -128 and exitCode <= 127:

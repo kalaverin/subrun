@@ -5,7 +5,7 @@ when withDir(thisDir(), system.fileExists("nimble.paths")):
 # end Nimble config
 
 switch("define", "release")
-switch("assertions", "off")
+switch("assertions", "on")    # unittest2 baseline + cheap internal invariants
 switch("panics", "on")
 
 switch("opt", "speed")

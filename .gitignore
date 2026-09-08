@@ -1,13 +1,21 @@
 .*
-*.md
+/*.log
+/AGENTS.md
 
 bin/
 var/
+
+!/.serena
 
 !.env
 !.envrc
 !.gitattributes
 !.gitignore
+
 nimble.develop
 nimble.paths
 nimbledeps
+
+tests/*
+!tests/*.nim
+!tests/*.nims
