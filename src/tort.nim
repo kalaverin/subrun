@@ -1,4 +1,4 @@
-## tt CLI — delivery layer (L5). Contains ONLY: arg dispatch, one central
+## tort CLI — delivery layer (L5). Contains ONLY: arg dispatch, one central
 ## error→exit-code map (E2), fd wiring. cligen is confined to this file (D7).
 
 import std/[os, posix]
@@ -55,10 +55,10 @@ proc cmdStream(dropJunk = false; oneWay = true) =
     let tp: TryJsonParse = if oneWay: tryParseJsonFrag else: nil
     discard streamRun(src, sink, wire, dropJunk, tp))
 
-const streamUsage = "usage: tort [stream] [--drop-junk] [--one-way[=false]] | tort encode [--one-way] | tt decode [--non-strict]"
+const streamUsage = "usage: tort [stream] [--drop-junk] [--one-way[=false]] | tort encode [--one-way] | tort decode [--non-strict]"
 
 when isMainModule:
-  ## D21': bare `tt` (or flags-only invocation) = stream, the default command.
+  ## D21': bare `tort` (or flags-only invocation) = stream, the default command.
   if paramCount() == 0:
     cmdStream()
   elif paramStr(1)[0] == '-':
