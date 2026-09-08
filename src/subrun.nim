@@ -75,6 +75,12 @@ const
   IdleThreshold1Sec = 60
   IdleThreshold2Sec = 600
 
+# LLM-facing Tort-reading instructions injected at the head of the stdout
+# stream under --tort (ADR: decisions/subrun/tort_agent_preamble). Tort
+# comments: `tort decode` never sees them. slurp embeds at compile time
+# (missing asset = compile error, E1).
+const TortAgentPreamble = slurp("tort_agent_preamble.md")
+
 # Catchable signals we handle: forward-all-catchable minus SIGPIPE (SIG_IGN)
 # and minus the synchronous fault class {SEGV, BUS, FPE, ILL, TRAP, EMT, SYS}
 # (our own crashes, not host events — default disposition kept).
@@ -747,6 +753,12 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
   r.streams[fkStdin] = Stream(srcFd: 0, dstFd: pipes[fkStdin].w, state: ssOpen)
   r.streams[fkStdout] = Stream(srcFd: pipes[fkStdout].r, dstFd: 1, state: ssOpen)
   r.streams[fkStderr] = Stream(srcFd: pipes[fkStderr].r, dstFd: 2, state: ssOpen)
+  if r.cfg.tort:
+    # First bytes of the channel, before any guest output; bypasses
+    # TortFilter by construction and lands in the session log as delivered
+    # bytes via tryFlush.
+    appendCompact(r.streams[fkStdout],
+                  cstring(TortAgentPreamble), TortAgentPreamble.len)
   r.lastActivity = getMonoTime()
 
   # Born-orphan rule (stage 19.1): hostPid==1 means the host died before our
