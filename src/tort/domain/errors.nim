@@ -1,8 +1,8 @@
-## TT error vocabulary — one exception class + reason enum (E3/E5).
+## Tort error vocabulary — one exception class + reason enum (E3/E5).
 ## line/col are 1-based; (0, 0) means "position not applicable".
 
 type
-  TtErrKind* = enum
+  TortErrorKind* = enum
     ekBacktrackUnderflow   ## K > scope stack depth (spec §3.1)
     ekBadEscape            ## unknown escape in context (spec §1.2)
     ekUnterminatedQuote    ## EOL/EOF inside QuotedString
@@ -11,17 +11,17 @@ type
     ekDuplicateKey         ## duplicate FinalKey in strict mode (spec §3.2)
     ekBadLiteral           ## malformed header / malformed Integer in [N]
     ekBadJson              ## yyjson read error (adapter boundary)
-    ekEncodeImpossible     ## shape not representable in TT (e.g. root non-object)
+    ekEncodeImpossible     ## shape not representable in Tort (e.g. root non-object)
     ekStreamResync         ## stream: document failed to parse (tolerant mode data)
     ekIo                   ## stdin/stdout read/write failure
 
-  TtError* = object of CatchableError
-    errKind*: TtErrKind
+  TortError* = object of CatchableError
+    errKind*: TortErrorKind
     line*: int
     col*: int
 
-proc raiseErr*(k: TtErrKind; msg: string; line = 0; col = 0) {.noreturn.} =
-  var e = newException(TtError, msg)
+proc raiseErr*(k: TortErrorKind; msg: string; line = 0; col = 0) {.noreturn.} =
+  var e = newException(TortError, msg)
   e.errKind = k
   e.line = line
   e.col = col

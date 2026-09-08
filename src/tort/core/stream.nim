@@ -1,4 +1,4 @@
-## Stream use case: chunked JSON-docs-and-junk in → per-doc TT out (tolerant, D1-flip).
+## Stream use case: chunked JSON-docs-and-junk in → per-doc Tort out (tolerant, D1-flip).
 ## Memory is bounded by the largest single document, not the stream length (D5).
 ## EPIPE is NOT handled here — that is the sink adapter's boundary (L4/L5).
 
@@ -17,7 +17,7 @@ type
 proc pumpBuf*[K: JsonSink; W: JsonWire](
     buf: var string; sink: var K; wire: var W; dropJunk: bool;
     tryParse: TryJsonParse; eof: bool; stats: var StreamStats) =
-  ## Inner stream loop, shared by streamRun (fd path) and TtFilter (library
+  ## Inner stream loop, shared by streamRun (fd path) and TortFilter (library
   ## path, D22'): process buf until NeedMore/exhaustion. eof=true enables the
   ## EOF-tail rule (a partial document becomes junk).
   while buf.len > 0:
@@ -49,7 +49,7 @@ proc pumpBuf*[K: JsonSink; W: JsonWire](
           sink.emit(DocSepToken & "\n")
         sink.emit(encode(wire.parseDoc(r.doc), tryParse))
         inc stats.docsEmitted
-      except TtError:
+      except TortError:
         ## valid JSON but unencodable (e.g. NaN) — tolerant mode: junk it
         inc stats.docsFailed
         if not dropJunk:

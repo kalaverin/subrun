@@ -1,4 +1,4 @@
-## TT → TtValue decoder. Recursive descent, one proc per grammar production.
+## Tort → TortValue decoder. Recursive descent, one proc per grammar production.
 ## Spec: tort-spec-v0.1.2.md §2 (grammar), §3 (trie scoping), §4 (tables), §7 (strict).
 
 import std/[strutils, tables]
@@ -9,7 +9,7 @@ type
   KeyEnd = tuple[delim: char, pos: int]   ## first structural delimiter after the key
 
   DecodeState = object
-    root: TtValue
+    root: TortValue
     strict: bool
     slots: Table[string, int]             ## joined full path → slot in parent oVal
 
@@ -101,14 +101,14 @@ proc joinPath(path: seq[string]): string =
   ## this is an internal index key, not user-facing text.
   path.join("\u0001")
 
-proc insertAt(st: var DecodeState; path: seq[string]; val: TtValue; line: int) =
+proc insertAt(st: var DecodeState; path: seq[string]; val: TortValue; line: int) =
   ## Insert val at path. Duplicate FinalKey: strict → ekDuplicateKey;
   ## non-strict → LWW (spec §3.2). Path-through-scalar is the same class.
   ## Index tables keyed by joined path keep this O(path), not O(siblings).
   var node = st.root
   for i in 0 ..< path.len - 1:
     let objKey = joinPath(path[0 .. i])
-    var child: TtValue
+    var child: TortValue
     if st.slots.hasKey(objKey):
       child = node.oVal[st.slots[objKey]][1]
       if child.kind != tkObject:
@@ -130,7 +130,7 @@ proc insertAt(st: var DecodeState; path: seq[string]; val: TtValue; line: int) =
   st.slots[leafKey] = node.oVal.len
   node.oVal.add (path[^1], val)
 
-proc parseValue(raw: string; line: int; colBase: int): TtValue =
+proc parseValue(raw: string; line: int; colBase: int): TortValue =
   ## ValueLine production (v0.1.3 order): the quote-aware comma split comes
   ## FIRST — a list of quoted items starts with '"' too. Containers and single
   ## quoted strings are whole-value forms.
@@ -143,7 +143,7 @@ proc parseValue(raw: string; line: int; colBase: int): TtValue =
   if items.len > 1:
     if items[^1].len == 0:
       items.setLen(items.len - 1)            ## D7: one trailing comma is legal
-    var vals: seq[TtValue] = @[]
+    var vals: seq[TortValue] = @[]
     for it in items:
       if it.len == 0:
         raiseErr(ekBadLiteral, "empty element in inline list", line, colBase)
@@ -231,7 +231,7 @@ proc parseHeader(text: string; line: int; bracketPos: int): tuple[
     if j >= hList.len:
       raiseErr(ekBadLiteral, "trailing '|' in header list", line, hStart + j + 1)
 
-proc parseCell(raw: string; line: int; col: int): TtValue =
+proc parseCell(raw: string; line: int; col: int): TortValue =
   ## Cell production: QuotedString | CellText; empty bare cell → "" (D6).
   let trimmed = raw.strip(leading = false, chars = {' ', '\t'})
   if trimmed.len > 0 and opensString(trimmed, 0):
@@ -245,7 +245,7 @@ proc isDocSep(text: string): bool =
   ## DocSep production (v0.1.3): optional ws + "---" + optional ws.
   text.strip(chars = {' ', '\t'}) == DocSepToken
 
-proc decodeSection(ls: seq[TtLine]; start: int; strict: bool): tuple[obj: TtValue, next: int] =
+proc decodeSection(ls: seq[TortLine]; start: int; strict: bool): tuple[obj: TortValue, next: int] =
   ## One Section production: lines up to (not including) the next DocSep.
   var st = DecodeState(root: ttObject(@[]), strict: strict)
   var scope: seq[string] = @[]
@@ -265,7 +265,7 @@ proc decodeSection(ls: seq[TtLine]; start: int; strict: bool): tuple[obj: TtValu
     elif delim == '[':
       let (dots, name, count, keyed, columns) = parseHeader(text, line, pos)
       applyScope(scope, dots, name, line)
-      var rows: seq[TtValue] = @[]
+      var rows: seq[TortValue] = @[]
       var keyedObj = ttObject(@[])
       var seen = 0
       var j = i + 1
@@ -288,7 +288,7 @@ proc decodeSection(ls: seq[TtLine]; start: int; strict: bool): tuple[obj: TtValu
                     parseStringAt(keyCell, 0, ls[j].num, 1).val
                   else:
                     unescapeBare(keyCell, qcCell, ls[j].num, 1)
-          var obj: seq[(string, TtValue)] = @[]
+          var obj: seq[(string, TortValue)] = @[]
           for c in 1 ..< columns.len:
             obj.add (columns[c], parseCell(cells[c], ls[j].num, 1))
           var dup = false
@@ -302,7 +302,7 @@ proc decodeSection(ls: seq[TtLine]; start: int; strict: bool): tuple[obj: TtValu
           if not dup:
             keyedObj.oVal.add (k, ttObject(obj))
         else:
-          var obj: seq[(string, TtValue)] = @[]
+          var obj: seq[(string, TortValue)] = @[]
           for c in 0 ..< columns.len:
             obj.add (columns[c], parseCell(cells[c], ls[j].num, 1))
           rows.add ttObject(obj)
@@ -315,10 +315,10 @@ proc decodeSection(ls: seq[TtLine]; start: int; strict: bool): tuple[obj: TtValu
       raiseErr(ekBadLiteral, "line is neither a KV line nor a table header", line, 1)
   (st.root, i)
 
-proc decode*(src: string; strict: bool): TtValue =
+proc decode*(src: string; strict: bool): TortValue =
   let ls = ttLines.splitLines(src)
   ## RootValue detection (v0.1.3): the WHOLE document is one keyless value line.
-  var content: seq[TtLine] = @[]
+  var content: seq[TortLine] = @[]
   var sepCount = 0
   for l in ls:
     if isBlank(l.text) or isComment(l.text):
@@ -337,7 +337,7 @@ proc decode*(src: string; strict: bool): TtValue =
   ## Sections: N sections → array of N objects; 1 section → the object.
   if sepCount == 0:
     return decodeSection(ls, 0, strict).obj
-  var sections: seq[TtValue] = @[]
+  var sections: seq[TortValue] = @[]
   var i = 0
   while i < ls.len:
     let (obj, next) = decodeSection(ls, i, strict)

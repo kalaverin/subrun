@@ -6,16 +6,16 @@ import cligen
 import tort/tort
 import tort/adapters/[fdio, stdin_chunks, stdout_sink, yyjson_bridge]
 
-proc exitCodeOf(k: TtErrKind): int =
+proc exitCodeOf(k: TortErrorKind): int =
   ## The single exit-code map: io → 1, everything else → 2 (L5 decision).
   if k == ekIo: 1 else: 2
 
 proc guarded(body: proc()) =
-  ## Central TtError handler: stderr "line:col kind: msg", then exit map.
+  ## Central TortError handler: stderr "line:col kind: msg", then exit map.
   discard signal(SIGPIPE, SIG_IGN)     ## EPIPE must surface as an error, not death
   try:
     body()
-  except TtError as e:
+  except TortError as e:
     var msg: string
     if e.line > 0:
       msg = $e.line & ":" & $e.col & " "
@@ -23,15 +23,15 @@ proc guarded(body: proc()) =
     stderr.writeLine msg
     quit(exitCodeOf(e.errKind))
 
-proc tryParseJsonFrag(s: string): TtValue =
+proc tryParseJsonFrag(s: string): TortValue =
   ## --one-way helper: full-string JSON parse, nil when not valid JSON.
   try:
     parseJson(s)
-  except TtError:
+  except TortError:
     nil
 
 proc cmdEncode(oneWay = false) =
-  ## stdin: one JSON document → stdout: TT.
+  ## stdin: one JSON document → stdout: Tort.
   ## --one-way is LOSSY (D18+D19): JSON-in-string unpack, gcd-indent→tabs,
   ## trailing ws strip, \n-runs→3.
   guarded(proc() =
@@ -39,12 +39,12 @@ proc cmdEncode(oneWay = false) =
     writeAll(1, encode(parseJson(readAll(0)), tp)))
 
 proc cmdDecode(nonStrict = false) =
-  ## stdin: TT text → stdout: compact JSON. Strict by default (D1).
+  ## stdin: Tort text → stdout: compact JSON. Strict by default (D1).
   guarded(proc() =
     writeAll(1, toJsonText(decode(readAll(0), strict = not nonStrict))))
 
 proc cmdStream(dropJunk = false; oneWay = true) =
-  ## stdin: stream of JSON docs (+ junk) → stdout: TT per doc, real-time.
+  ## stdin: stream of JSON docs (+ junk) → stdout: Tort per doc, real-time.
   ## DEFAULT command (D21'). --one-way is ON here by default (LOSSY, D18+D19):
   ## JSON-in-string unpack, gcd-indent→tabs, trailing ws strip, \n-runs→3.
   ## --one-way=false restores the bijective stream codec.

@@ -1,4 +1,4 @@
-## TtValue → TT encoder. Spec: tort-spec-v0.1.2.md §5 (decision matrix), §6 (canon).
+## TortValue → Tort encoder. Spec: tort-spec-v0.1.2.md §5 (decision matrix), §6 (canon).
 ## Shape detection (Jaccard tables) + dot-trie prefix-diff emission.
 
 import std/[algorithm, sets, strutils]
@@ -9,17 +9,17 @@ type
   EmitItem = object
     path: seq[string]
     blk: string          ## non-empty: whole table block (multi-line)
-    leaf: TtValue        ## blk empty: KV leaf value
+    leaf: TortValue        ## blk empty: KV leaf value
 
-proc isScalarish(v: TtValue): bool =
+proc isScalarish(v: TortValue): bool =
   ## Table cells / inline-list items must be scalars; containers force fallback.
   v.kind notin {tkList, tkObject}
 
-proc keySet(v: TtValue): HashSet[string] =
+proc keySet(v: TortValue): HashSet[string] =
   for (k, _) in v.oVal:
     result.incl k
 
-proc keyJaccard(items: seq[TtValue]): float =
+proc keyJaccard(items: seq[TortValue]): float =
   ## Key-set Jaccard similarity across object items, spec §5.1.
   var uni, inter: HashSet[string]
   for idx, it in items:
@@ -33,7 +33,7 @@ proc keyJaccard(items: seq[TtValue]): float =
     return 1.0
   inter.len.float / uni.len.float
 
-proc isTableCandidate(v: TtValue): bool =
+proc isTableCandidate(v: TortValue): bool =
   ## Array of >= 2 uniform objects with scalar-only fields (spec §5.1).
   if v.kind != tkList or v.lVal.len < 2:
     return false
@@ -45,11 +45,11 @@ proc isTableCandidate(v: TtValue): bool =
         return false
   keyJaccard(v.lVal) >= JaccardThreshold
 
-proc isKeyedCandidate(v: TtValue): bool =
+proc isKeyedCandidate(v: TortValue): bool =
   ## Object of >= 2 uniform non-empty objects with scalar-only fields (§5 matrix).
   if v.kind != tkObject or v.oVal.len < 2:
     return false
-  var vals: seq[TtValue] = @[]
+  var vals: seq[TortValue] = @[]
   for (_, f) in v.oVal:
     if f.kind != tkObject or f.oVal.len == 0:
       return false
@@ -59,7 +59,7 @@ proc isKeyedCandidate(v: TtValue): bool =
     vals.add f
   keyJaccard(vals) >= JaccardThreshold
 
-proc unionColumns(items: seq[TtValue]): seq[string] =
+proc unionColumns(items: seq[TortValue]): seq[string] =
   var seen: HashSet[string]
   for it in items:
     for (k, _) in it.oVal:
@@ -68,13 +68,13 @@ proc unionColumns(items: seq[TtValue]): seq[string] =
         result.add k
   result.sort()                        ## deterministic column order (C4)
 
-proc findField(obj: TtValue; key: string): TtValue =
+proc findField(obj: TortValue; key: string): TortValue =
   for (k, f) in obj.oVal:
     if k == key:
       return f
   nil
 
-proc renderTable(absName: string; items: seq[TtValue]): string =
+proc renderTable(absName: string; items: seq[TortValue]): string =
   ## TableBlock emission (spec §4 shape, §5.1 heuristics).
   ## absName is the fully rendered absolute key (multi-segment, pending D8).
   let cols = unionColumns(items)
@@ -96,9 +96,9 @@ proc renderTable(absName: string; items: seq[TtValue]): string =
     lines.add row
   lines.join("\n")
 
-proc renderKeyedTable(absName: string; obj: TtValue): string =
+proc renderKeyedTable(absName: string; obj: TortValue): string =
   ## KeyedTableBlock emission: first column = object key (raw string, spec §4.5).
-  var vals: seq[TtValue] = @[]
+  var vals: seq[TortValue] = @[]
   for (_, f) in obj.oVal:
     vals.add f
   let cols = unionColumns(vals)
@@ -118,7 +118,7 @@ proc renderKeyedTable(absName: string; obj: TtValue): string =
     lines.add row
   lines.join("\n")
 
-proc renderLeaf(v: TtValue): string =
+proc renderLeaf(v: TortValue): string =
   ## KV leaf value: scalar, inline scalar list, or empty container (v0.1.2).
   case v.kind
   of tkList:
@@ -146,7 +146,7 @@ proc renderPathAbs(path: seq[string]): string =
       result.add DotChar
     result.add renderKey(seg)
 
-proc flatten(items: var seq[EmitItem]; v: TtValue; path: seq[string]) =
+proc flatten(items: var seq[EmitItem]; v: TortValue; path: seq[string]) =
   ## Walk a value: qualifying shapes become blocks; the rest becomes KV leaves.
   ## Non-uniform object arrays flatten via numeric key segments (spec §3.2 trace).
   case v.kind
@@ -184,7 +184,7 @@ proc cmpPath(a, b: seq[string]): int =
     if a[i] > b[i]: return 1
   a.len - b.len
 
-proc emit(root: TtValue): seq[string] =
+proc emit(root: TortValue): seq[string] =
   var items: seq[EmitItem] = @[]
   for (k, c) in root.oVal:
     flatten(items, c, @[k])
@@ -218,11 +218,11 @@ proc emit(root: TtValue): seq[string] =
     prev = it.path
 
 type
-  TryJsonParse* = proc(s: string): TtValue
+  TryJsonParse* = proc(s: string): TortValue
     ## --one-way injection point: full-string JSON parse, nil on failure.
     ## Core must not import the yyjson adapter — the app layer supplies this.
 
-proc oneWayTree*(v: TtValue; tryParse: TryJsonParse; depth = 0) =
+proc oneWayTree*(v: TortValue; tryParse: TryJsonParse; depth = 0) =
   ## D18+D19 (--one-way, LOSSY, opt-in): (1) a string value that FULLY parses
   ## as a JSON object/array is replaced by the parsed structure, recursively
   ## (depth-capped); (2) every remaining string value gets whitespace squash —
@@ -246,7 +246,7 @@ proc oneWayTree*(v: TtValue; tryParse: TryJsonParse; depth = 0) =
   else:
     discard
 
-proc encode*(v: TtValue; tryParse: TryJsonParse = nil): string =
+proc encode*(v: TortValue; tryParse: TryJsonParse = nil): string =
   ## Root mapping (v0.1.3 D10): object → sections; array of objects →
   ## DocSep-separated sections; scalar / scalar list → one bare ValueLine;
   ## mixed root arrays are rejected. tryParse != nil ⇒ LOSSY --one-way mode.

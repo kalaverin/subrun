@@ -18,11 +18,11 @@ type
     s.next() is Chunk
 
   JsonSink* = concept var s
-    s.emit(string)         ## parsed doc → TT text
+    s.emit(string)         ## parsed doc → Tort text
     s.junk(string)         ## verbatim passthrough of a non-document chunk
     s.flush()              ## push buffered output NOW (per-doc protocol flush)
 
   JsonWire* = concept var s
     ## JSON text boundary + JSON text → AST, in core vocabulary.
     s.trySplit(string) is SplitResult
-    s.parseDoc(string) is TtValue
+    s.parseDoc(string) is TortValue

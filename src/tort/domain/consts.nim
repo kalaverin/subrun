@@ -1,4 +1,4 @@
-## Grammar constants for TT v0.1.2 — every magic token of the format lives here.
+## Grammar constants for Tort v0.1.2 — every magic token of the format lives here.
 ## Spec: .serena/memories/solutions/subrun/tt_proto/tort-spec-v0.1.2.md
 
 const

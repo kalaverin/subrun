@@ -3,9 +3,9 @@
 ## No filtering here: blank/comment decisions live next to scope logic (G4).
 
 type
-  TtLine* = tuple[num: int, text: string]
+  TortLine* = tuple[num: int, text: string]
 
-proc splitLines*(src: string): seq[TtLine] =
+proc splitLines*(src: string): seq[TortLine] =
   var start = 0
   var num = 1
   var i = 0

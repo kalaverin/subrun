@@ -1,5 +1,5 @@
 ## yyjson anti-corruption adapter — the ONLY module importing yyjson (D7).
-## yyjson types never cross this boundary: TtValue and plain strings cross instead.
+## yyjson types never cross this boundary: TortValue and plain strings cross instead.
 
 import yyjson
 import yyjson/private          ## yyjson_read_opts + read_size for the splitter
@@ -13,7 +13,7 @@ const
   SplitFlags* = ReadFlags or YYJSON_READ_STOP_WHEN_DONE
     ## splitter set: STOP_WHEN_DONE gives free doc-boundary detection
 
-proc toTtValue(v: JsonVal): TtValue =
+proc toTtValue(v: JsonVal): TortValue =
   case v.kind
   of jkNull:
     ttNull()
@@ -33,20 +33,20 @@ proc toTtValue(v: JsonVal): TtValue =
   of jkString:
     ttStr(v.str)
   of jkArray:
-    var items: seq[TtValue] = @[]
+    var items: seq[TortValue] = @[]
     for it in v.items:
       items.add toTtValue(it)
     ttList(items)
   of jkObject:
-    var pairs: seq[(string, TtValue)] = @[]
+    var pairs: seq[(string, TortValue)] = @[]
     for k, f in v.pairs:
       pairs.add ($k, toTtValue(f))
     ttObject(pairs)
   of jkNone, jkRaw:
     raiseErr(ekBadJson, "unexpected yyjson value kind: " & $v.kind)
 
-proc parseJson*(text: string): TtValue =
-  ## JSON text → TtValue. yyjson errors are translated to ekBadJson with
+proc parseJson*(text: string): TortValue =
+  ## JSON text → TortValue. yyjson errors are translated to ekBadJson with
   ## line:col via yyjson's own locate_pos.
   var doc: JsonDoc
   try:
@@ -62,7 +62,7 @@ proc parseJson*(text: string): TtValue =
     doc.close()
   toTtValue(doc.root)
 
-proc toMut(d: JsonMutDoc; v: TtValue): JsonMutVal =
+proc toMut(d: JsonMutDoc; v: TortValue): JsonMutVal =
   case v.kind
   of tkNull:
     d.newNull()
@@ -85,8 +85,8 @@ proc toMut(d: JsonMutDoc; v: TtValue): JsonMutVal =
       o.add(k, toMut(d, f))
     o
 
-proc toJsonText*(v: TtValue): string =
-  ## TtValue → compact JSON text (pretty-printing is jq's job, L0).
+proc toJsonText*(v: TortValue): string =
+  ## TortValue → compact JSON text (pretty-printing is jq's job, L0).
   var d = newJsonMutDoc()
   defer:
     d.close()
@@ -119,5 +119,5 @@ proc trySplit*(s: var YySplitter; buf: string): SplitResult =
   yyjson_doc_free(p)
   (ssDoc, buf[0 ..< n], buf[n .. ^1])
 
-proc parseDoc*(s: var YySplitter; text: string): TtValue =
+proc parseDoc*(s: var YySplitter; text: string): TortValue =
   parseJson(text)

@@ -248,7 +248,7 @@ proc parseStringAt*(s: string; start: int; line, col: int): tuple[val: string, n
     return parseEscFenceAt(s, start, line, col)
   parseQuotedAt(s, start, line, col)
 
-proc classifyBare*(tok: string; ctx: QuoteContext; line, col: int): TtValue =
+proc classifyBare*(tok: string; ctx: QuoteContext; line, col: int): TortValue =
   ## Token typing rule, spec §1.1: classification on the RAW token,
   ## unescape only after the token is known to be a string.
   if tok == NullToken:
@@ -404,7 +404,7 @@ proc canonFloat*(f: float64): string =
   if f == 0.0:
     return "0."                              ## float zero keeps its type marker (D11)
   if f != f or f == 1.0/0.0 or f == -1.0/0.0:
-    raiseErr(ekEncodeImpossible, "NaN/Inf are not representable in TT")
+    raiseErr(ekEncodeImpossible, "NaN/Inf are not representable in Tort")
   var s = $f                                 ## Nim shortest round-trip form
   let af = abs(f)
   if 'e' in s or 'E' in s:
@@ -558,7 +558,7 @@ proc renderString*(s: string; ctx: QuoteContext): string =
       return ef & escapeFenced(s) & ef
   quote(s)
 
-proc renderScalar*(v: TtValue; ctx: QuoteContext): string =
+proc renderScalar*(v: TortValue; ctx: QuoteContext): string =
   ## Scalar → text. Lists/objects are the encoder's job (shape decisions).
   case v.kind
   of tkNull: NullToken
