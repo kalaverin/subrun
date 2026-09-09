@@ -637,6 +637,13 @@ proc tryFlush(r: var Runner, kind: FdKind) =
       continue
     elif errno == EAGAIN or errno == EWOULDBLOCK:
       break                         # wait for POLLOUT
+    elif errno == EPIPE:
+      # Downstream closed the pipe (classic `| head`): not an error for a
+      # stdio proxy — the exit code already follows the 128+SIGPIPE
+      # convention via the guest's own SIGPIPE death.
+      debug "Downstream closed the pipe, closing direction", fd = $kind
+      closeDirection(r, kind)
+      return
     else:
       error "Write error, closing direction", fd = $kind, error = $strerror(errno)
       closeDirection(r, kind)
