@@ -70,7 +70,7 @@ proc isFloatLit*(s: string): bool =
 proc escapeSet(ctx: QuoteContext): set[char] =
   case ctx
   of qcValue, qcRoot: {'n', '\\', ','}   ## \, allowed per spec §2 note 2
-  of qcCell: {'|', 'n', '\\'}
+  of qcCell: {'|', 'n', '\\', '^'}   ## \^ = literal caret (D22, v0.1.8)
   of qcItem, qcRootItem: {',', '\\'}
   of qcKey: {'.', ':'}
 
@@ -247,6 +247,30 @@ proc parseStringAt*(s: string; start: int; line, col: int): tuple[val: string, n
   if escFenceAt(s, start).len > 0:
     return parseEscFenceAt(s, start, line, col)
   parseQuotedAt(s, start, line, col)
+
+proc parseHeredocHeader*(text: string; line, col: int): int =
+  ## D24 (v0.1.8): text = trimmed value region. -1 when NOT a heredoc header
+  ## (``` not followed by '[' → EscapedFence, the existing path). Else N.
+  ## Malformed Integer or junk after ']' → ekBadLiteral (spec §7).
+  if not text.startsWith(HeredocFence):
+    return -1
+  if text.len <= HeredocFence.len or text[HeredocFence.len] != '[':
+    return -1
+  var i = HeredocFence.len + 1
+  let nStart = i
+  while i < text.len and text[i] in {'0'..'9'}:
+    inc i
+  if i == nStart:
+    raiseErr(ekBadLiteral, "malformed Integer in heredoc header", line, col + i)
+  if i >= text.len or text[i] != ']':
+    raiseErr(ekBadLiteral, "malformed heredoc header", line, col + i)
+  inc i
+  if i != text.len:
+    raiseErr(ekBadLiteral, "trailing content after heredoc header", line, col + i)
+  try:
+    parseInt(text[nStart ..< i - 1])
+  except ValueError:
+    raiseErr(ekBadLiteral, "heredoc line count out of range", line, col + nStart)
 
 proc classifyBare*(tok: string; ctx: QuoteContext; line, col: int): TortValue =
   ## Token typing rule, spec §1.1: classification on the RAW token,
@@ -430,6 +454,8 @@ proc needsQuoting*(s: string; ctx: QuoteContext): bool =
   if s.len > 0:
     if s == NullToken or s == TrueToken or s == FalseToken:
       return true
+    if ctx == qcCell and s == DittoMark:
+      return true                            ## bare `^` is the ditto operator (D22)
     if ctx in {qcValue, qcRoot} and (s == EmptyObjToken or s == EmptyArrToken):
       return true                            ## would decode as a container (v0.1.2)
     if ctx == qcRoot and s == DocSepToken:
@@ -547,6 +573,15 @@ proc renderString*(s: string; ctx: QuoteContext): string =
     return ""                                ## bare empty cell (D6)
   if not needsQuoting(s, ctx):
     return s
+  if ctx == qcValue and s.len > 0 and s[^1] == '\n' and '\r' notin s:
+    ## D24 (v0.1.8): heredoc, priority 2 (§6.2). Eligibility guard: contains
+    ## '\n' (implied by the trailing one) AND ends with '\n'; '\r' is excluded
+    ## by the HeredocLine grammar. Multi-line without trailing '\n' falls through.
+    var n = 0
+    for c in s:
+      if c == '\n':
+        inc n
+    return HeredocFence & "[" & $n & "]\n" & s
   let esc = escapeCount(s)
   if '\n' notin s and '\r' notin s:
     let rf = findRawFence(s)

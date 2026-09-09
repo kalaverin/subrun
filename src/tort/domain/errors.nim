@@ -8,6 +8,9 @@ type
     ekUnterminatedQuote    ## EOL/EOF inside QuotedString
     ekRowCountMismatch     ## fewer than N rows before block end (spec §4.2)
     ekWidthMismatch        ## cell count != header width (spec §4.3)
+    ekDittoUnderflow       ## ditto cell in a table's first row (D22, v0.1.8)
+    ekBadPath              ## [] in a TableKey / [] under scalar-object prefix (D23, v0.1.8)
+    ekUnterminatedHeredoc  ## EOF before a heredoc's N content lines (D24, v0.1.8)
     ekDuplicateKey         ## duplicate FinalKey in strict mode (spec §3.2)
     ekBadLiteral           ## malformed header / malformed Integer in [N]
     ekBadJson              ## yyjson read error (adapter boundary)

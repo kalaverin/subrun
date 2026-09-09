@@ -5,6 +5,10 @@ import std/[algorithm, sets, strutils]
 import ../domain/[ast, errors, literal, consts]
 import consts as coreConsts
 
+const
+  AnonMarkChar = char(0x02)    ## D23: internal path-segment prefix marking array
+  AnonMarkString = "\u0002"   ##   elements (not in BareIdentChars: no collisions)
+
 type
   EmitItem = object
     path: seq[string]
@@ -74,6 +78,14 @@ proc findField(obj: TortValue; key: string): TortValue =
       return f
   nil
 
+proc stripNullTail(cells: var seq[string]) =
+  ## D21 (v0.1.8): elide trailing NullToken cells. Index 0 is never stripped:
+  ## an all-null standard row collapses to "~"; keyed cells[0] is the key.
+  var n = cells.len
+  while n > 1 and cells[n - 1] == NullToken:
+    dec n
+  cells.setLen(n)
+
 proc renderTable(absName: string; items: seq[TortValue]): string =
   ## TableBlock emission (spec §4 shape, §5.1 heuristics).
   ## absName is the fully rendered absolute key (multi-segment, pending D8).
@@ -86,14 +98,21 @@ proc renderTable(absName: string; items: seq[TortValue]): string =
     header.add renderKey(c)
   header.add "}:"
   lines.add header
-  for it in items:
-    var row = ""
-    for idx, c in cols:
-      if idx > 0:
-        row.add PipeChar
+  for r, it in items:
+    var cells: seq[string] = @[]
+    for c in cols:
       let cell = findField(it, c)
-      row.add(if cell.isNil: NullToken else: renderScalar(cell, qcCell))
-    lines.add row
+      let rendered = if cell.isNil: NullToken else: renderScalar(cell, qcCell)
+      if r > 0 and rendered.len > 1:
+        ## D22: ditto iff value == previous row's value AND render > 1 char
+        let prev = findField(items[r - 1], c)
+        if tortEqual(if cell.isNil: ttNull() else: cell,
+                     if prev.isNil: ttNull() else: prev):
+          cells.add DittoMark
+          continue
+      cells.add rendered
+    stripNullTail(cells)                 ## §5.1 pipeline: render → ditto → strip
+    lines.add cells.join($PipeChar)
   lines.join("\n")
 
 proc renderKeyedTable(absName: string; obj: TortValue): string =
@@ -109,13 +128,20 @@ proc renderKeyedTable(absName: string; obj: TortValue): string =
     header.add renderKey(c)
   header.add "}:"
   lines.add header
-  for (k, f) in obj.oVal:
-    var row = renderScalar(ttStr(k), qcCell)
+  for r, (k, f) in obj.oVal:
+    var cells = @[renderScalar(ttStr(k), qcCell)]   ## key cell: never dittoed
     for c in cols:
-      row.add PipeChar
       let cell = findField(f, c)
-      row.add(if cell.isNil: NullToken else: renderScalar(cell, qcCell))
-    lines.add row
+      let rendered = if cell.isNil: NullToken else: renderScalar(cell, qcCell)
+      if r > 0 and rendered.len > 1:
+        let prev = findField(vals[r - 1], c)
+        if tortEqual(if cell.isNil: ttNull() else: cell,
+                     if prev.isNil: ttNull() else: prev):
+          cells.add DittoMark
+          continue
+      cells.add rendered
+    stripNullTail(cells)                 ## D21: key cell survives (index 0)
+    lines.add cells.join($PipeChar)
   lines.join("\n")
 
 proc renderLeaf(v: TortValue): string =
@@ -142,9 +168,12 @@ proc renderLeaf(v: TortValue): string =
 
 proc renderPathAbs(path: seq[string]): string =
   for idx, seg in path:
-    if idx > 0:
-      result.add DotChar
-    result.add renderKey(seg)
+    if seg.len > 0 and seg[0] == AnonMarkChar:
+      result.add AnonScopeToken            ## D23: marker attaches with no dot
+    else:
+      if idx > 0:
+        result.add DotChar
+      result.add renderKey(seg)
 
 proc flatten(items: var seq[EmitItem]; v: TortValue; path: seq[string]) =
   ## Walk a value: qualifying shapes become blocks; the rest becomes KV leaves.
@@ -173,13 +202,23 @@ proc flatten(items: var seq[EmitItem]; v: TortValue; path: seq[string]) =
         items.add EmitItem(path: path, leaf: v)
       else:
         for idx, it in v.lVal:
-          flatten(items, it, path & $idx)
+          ## D23: anonymous-scope descent replaces numeric key segments
+          flatten(items, it, path & (AnonMarkString & $idx))
   else:
     items.add EmitItem(path: path, leaf: v)
 
 proc cmpPath(a, b: seq[string]): int =
-  ## Lexicographic by segments (spec §5.2.2).
+  ## Lexicographic by segments (spec §5.2.2). v0.1.8 (D23): marker segments
+  ## compare NUMERICALLY — the sort never crosses array boundaries (append
+  ## order is semantic); marker-vs-key at one position cannot occur.
   for i in 0 ..< min(a.len, b.len):
+    let am = a[i].len > 0 and a[i][0] == AnonMarkChar
+    let bm = b[i].len > 0 and b[i][0] == AnonMarkChar
+    if am and bm:
+      let d = parseInt(a[i][1 .. ^1]) - parseInt(b[i][1 .. ^1])
+      if d != 0:
+        return d
+      continue
     if a[i] < b[i]: return -1
     if a[i] > b[i]: return 1
   a.len - b.len
@@ -205,9 +244,12 @@ proc emit(root: TortValue): seq[string] =
       ## relative: K dots + suffix (spec §5.2.3)
       line = repeat(DotChar, k)
       for idx in l ..< it.path.len:
-        if idx > l:
-          line.add DotChar
-        line.add renderKey(it.path[idx])
+        if it.path[idx].len > 0 and it.path[idx][0] == AnonMarkChar:
+          line.add AnonScopeToken          ## D23: no dot before a marker
+        else:
+          if idx > l:
+            line.add DotChar
+          line.add renderKey(it.path[idx])
     else:
       ## k == prev.len (no common prefix) or k == 0 (descend): absolute form
       line = renderPathAbs(it.path)

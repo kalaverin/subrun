@@ -11,15 +11,18 @@ const
   EscapeChar* = '\\'          ## escape introducer, all contexts
   CommentChar* = '#'          ## comment introducer (line level)
   PipeChar* = '|'             ## cell/header separator
+  DittoMark* = "^"            ## ditto cell: previous row's resolved value (D22, v0.1.8)
   CommaChar* = ','            ## inline-list separator
   ColonChar* = ':'            ## key/value separator
   DotChar* = '.'              ## path separator / relative-dot
+  AnonScopeToken* = "[]"      ## anonymous array scope segment (D23, v0.1.8)
 
   NoExpLow* = 1e-6            ## floats >= this use plain notation (D2)
   NoExpHigh* = 1e21           ## floats < this use plain notation (D2)
 
   RawFence* = "\"\"\""       ## RawString delimiter: verbatim, no escapes (v0.1.4)
   EscFences* = ["'''", "```"]  ## EscapedFence delimiters: D3 hatches, '"' free (D20, v0.1.7)
+  HeredocFence* = "```"       ## heredoc header prefix when followed by '[' (D24, v0.1.8)
   DocSepToken* = "---"       ## section separator line (v0.1.3); stream doc boundary (D13)
   RawMinEscapes* = 3          ## raw form needs at least this many escapable chars
   RawDensityDiv* = 20         ##   and at least len/div of them (5%)

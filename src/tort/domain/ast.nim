@@ -49,3 +49,32 @@ proc ttList*(items: seq[TortValue]): TortValue =
 
 proc ttObject*(pairs: seq[(string, TortValue)]): TortValue =
   TortValue(kind: tkObject, oVal: pairs)
+
+proc tortEqual*(a, b: TortValue): bool =
+  ## Deep structural equality (D22 encoder: ditto emission test).
+  ## nil ≡ "field absent"; objects compare positionally (insertion order
+  ## is format semantics). Not an `==` overload by design.
+  if a.isNil or b.isNil:
+    return a.isNil == b.isNil
+  if a.kind != b.kind:
+    return false
+  case a.kind
+  of tkNull: true
+  of tkBool: a.bVal == b.bVal
+  of tkInt: a.iVal == b.iVal
+  of tkFloat: a.fVal == b.fVal
+  of tkString: a.sVal == b.sVal
+  of tkList:
+    if a.lVal.len != b.lVal.len:
+      return false
+    for i in 0 ..< a.lVal.len:
+      if not tortEqual(a.lVal[i], b.lVal[i]):
+        return false
+    true
+  of tkObject:
+    if a.oVal.len != b.oVal.len:
+      return false
+    for i in 0 ..< a.oVal.len:
+      if a.oVal[i][0] != b.oVal[i][0] or not tortEqual(a.oVal[i][1], b.oVal[i][1]):
+        return false
+    true
