@@ -46,29 +46,27 @@ suite "e2e: tort CLI":
     check "junk line" in o
     check "a: 1" in o
 
-  test "T29: flags-only invocation accepts cligen space-form values":
+  test "T29: flags-only invocation accepts cligen prefix and camelCase forms":
+    ## cligen normalizes long options (--one-way == --oneWay) and accepts any
+    ## unambiguous prefix (--one-w) — the hand-rolled parser knew neither.
     if not fileExists(TortBin):
       skip()
-    let (o, c) = run(TortBin, ["--one-way", "false"], "{\"a\": 1}\n")
-    check c == 0
-    check "a: 1" in o
-
-  test "T29: flags-only --drop-junk drops junk":
-    if not fileExists(TortBin):
-      skip()
-    let (o, c) = run(TortBin, ["--drop-junk", "--one-way=false"],
-                     "junk line\n{\"a\": 1}\n")
-    check c == 0
-    check "junk" notin o
-    check "a: 1" in o
+    let (o1, c1) = run(TortBin, ["--one-w=false"], "{\"a\": 1}\n")
+    check c1 == 0
+    check "a: 1" in o1
+    let (o2, c2) = run(TortBin, ["--dropJunk", "--one-way=false"],
+                       "junk line\n{\"a\": 1}\n")
+    check c2 == 0
+    check "junk" notin o2
+    check "a: 1" in o2
 
   test "T29: --help is cligen-generated with flag documentation":
     if not fileExists(TortBin):
       skip()
     let (o, c) = run(TortBin, ["--help"])
     check c == 0
-    check "drop-junk" in o
-    check "one-way" in o
+    check "dropJunk" in o                 ## cligen renders canonical camelCase
+    check "oneWay" in o
     check "optional-params" in o          ## cligen help shape, not a one-liner
 
   test "T29: unknown flag exits 2":

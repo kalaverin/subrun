@@ -1,7 +1,7 @@
 ## tort CLI — delivery layer (L5). Contains ONLY: arg dispatch, one central
 ## error→exit-code map (E2), fd wiring. cligen is confined to this file (D7).
 
-import std/[os, posix]
+import std/[os, posix, tables]
 import cligen
 import tort/tort
 import tort/adapters/[fdio, stdin_chunks, stdout_sink, yyjson_bridge]
@@ -55,30 +55,21 @@ proc cmdStream(dropJunk = false; oneWay = true) =
     let tp: TryJsonParse = if oneWay: tryParseJsonFrag else: nil
     discard streamRun(src, sink, wire, dropJunk, tp))
 
-const streamUsage = "usage: tort [stream] [--drop-junk] [--one-way[=false]] | tort encode [--one-way] | tort decode [--non-strict]"
+const StreamHelp = {
+  "dropJunk": "Drop undecodable junk instead of passing it through verbatim",
+  "oneWay": "Lossy payload transform (D18+D19); --one-way=false restores the bijective codec",
+}.toTable
 
 when isMainModule:
-  ## D21': bare `tort` (or flags-only invocation) = stream, the default command.
-  if paramCount() == 0:
+  ## D21': bare `tort` (or a flags-only invocation) = stream, the default
+  ## command. One parser for the whole CLI (T29): flags-only args are
+  ## dispatched to cmdStream by cligen itself; subcommands go to dispatchMulti.
+  cgParseErrorExitCode = 2   ## CLI syntax errors exit 2, like the codec (E2)
+  let argv = commandLineParams()
+  if argv.len == 0:
     cmdStream()
-  elif paramStr(1)[0] == '-':
-    ## flags-only: only stream's flags are legal in the default command
-    var dropJunk = false
-    var oneWay = true
-    for a in commandLineParams():
-      case a
-      of "--drop-junk": dropJunk = true
-      of "--one-way": oneWay = true
-      of "--one-way=false", "--one-way=0", "--one-way=no", "--one-way=off":
-        oneWay = false
-      of "-h", "--help":
-        echo streamUsage
-        quit(0)
-      else:
-        stderr.writeLine "unknown stream flag: " & a
-        stderr.writeLine streamUsage
-        quit(2)
-    cmdStream(dropJunk = dropJunk, oneWay = oneWay)
+  elif argv[0][0] == '-':
+    dispatch(cmdStream, cmdName = "tort", help = StreamHelp)
   else:
     dispatchMulti(
       [cmdEncode, cmdName = "encode"],
