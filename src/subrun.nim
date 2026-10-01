@@ -9,7 +9,8 @@ import
   std/[posix, os, oserrors, monotimes, times, strutils, tables],
   pkg/chronicles,
   pkg/cligen,
-  tort/tort
+  tort/tort,
+  subrun_mcp
 
 # All wrapper logs go to stderr — stdout is the guest's data channel
 # (MCP JSON-RPC), it must stay clean (S1.5, J4).
@@ -75,12 +76,7 @@ const
   IdleThreshold1Sec = 60
   IdleThreshold2Sec = 600
 
-# LLM-facing Tort-reading instructions injected at the head of the stdout
-# stream under --tort (ADR: decisions/subrun/tort_agent_preamble). Tort
-# comments: `tort decode` never sees them. slurp embeds at compile time
-# (missing asset = compile error, E1).
-const TortAgentPreamble = slurp("tort_agent_preamble.md")
-
+# -----------------------------------------------------------------------------
 # Catchable signals we handle: forward-all-catchable minus SIGPIPE (SIG_IGN)
 # and minus the synchronous fault class {SEGV, BUS, FPE, ILL, TRAP, EMT, SYS}
 # (our own crashes, not host events — default disposition kept).
@@ -151,6 +147,8 @@ type
     verbose: bool
     debugMode: bool       # derived once at startup (S5.5)
     tort: bool            # --tort: guest stdout through TortFilter (one-way)
+    mcp: bool             # --mcp (requires --tort): MCP envelope-preserving payload filter
+    oneWay: bool          # --one-way: lossy payload encode in --mcp mode (D18+D19)
 
   Logger = object
     enabled: bool
@@ -174,7 +172,8 @@ type
     logger: Logger
     logSessionCounter: int
     lastActivity: MonoTime
-    tortFilter: TortFilter  # live only when cfg.tort; zero-value otherwise
+    tortFilter: TortFilter  # live only when cfg.tort and not cfg.mcp
+    mcpFilter: McpFilter    # live only when cfg.tort and cfg.mcp
 
 # -----------------------------------------------------------------------------
 # Low-level fd helpers
@@ -668,7 +667,11 @@ proc onSourceEof(r: var Runner, kind: FdKind) =
     s.readOff = 0
     s.state = ssClosed
   else:
-    if kind == fkStdout and r.cfg.tort:
+    if kind == fkStdout and r.cfg.tort and r.cfg.mcp:
+      let tail = r.mcpFilter.drain()
+      if tail.len > 0:
+        appendCompact(s[], unsafeAddr tail[0], tail.len)
+    elif kind == fkStdout and r.cfg.tort:
       try:
         let filtered = r.tortFilter.finish()
         if filtered.len > 0:
@@ -692,9 +695,16 @@ proc pumpRead(r: var Runner, kind: FdKind) =
   while n < 0 and errno == EINTR:
     n = posix.read(s.srcFd, addr chunk[0], ReadChunk)   # S6.3: retry
   if n > 0:
-    if kind == fkStdout and r.cfg.tort:
+    if kind == fkStdout and r.cfg.tort and r.cfg.mcp:
+      # MCP mode: NDJSON line filter; a partial line may yield no bytes yet.
+      let filtered = r.mcpFilter.feedStdout(chunk[0 ..< int(n)])
+      if filtered.len > 0:
+        appendCompact(s[], unsafeAddr filtered[0], filtered.len)
+    elif kind == fkStdout and r.cfg.tort:
       tortFeed(r, s, chunk[0 ..< int(n)])
     else:
+      if kind == fkStdin and r.cfg.mcp:
+        r.mcpFilter.feedStdin(chunk[0 ..< int(n)])   # tap-only, bytes unchanged
       appendCompact(s[], addr chunk[0], int(n))
     tryFlush(r, kind)
   elif n == 0:
@@ -760,12 +770,8 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
   r.streams[fkStdin] = Stream(srcFd: 0, dstFd: pipes[fkStdin].w, state: ssOpen)
   r.streams[fkStdout] = Stream(srcFd: pipes[fkStdout].r, dstFd: 1, state: ssOpen)
   r.streams[fkStderr] = Stream(srcFd: pipes[fkStderr].r, dstFd: 2, state: ssOpen)
-  if r.cfg.tort:
-    # First bytes of the channel, before any guest output; bypasses
-    # TortFilter by construction and lands in the session log as delivered
-    # bytes via tryFlush.
-    appendCompact(r.streams[fkStdout],
-                  cstring(TortAgentPreamble), TortAgentPreamble.len)
+  # (No stream-head injection: the Tort preamble lives only in --mcp mode,
+  #  inside the first transformed content[i].text — McpFilter.preambleDone.)
   r.lastActivity = getMonoTime()
 
   # Born-orphan rule (stage 19.1): hostPid==1 means the host died before our
@@ -829,6 +835,8 @@ proc run(
     env: seq[string] = @[],
     verbose: bool = false,
     tort: bool = false,
+    mcp: bool = false,
+    oneWay: bool = false,
     command: seq[string]
 ): int =
   ## Run a guest process with byte-exact stdio proxying and bounded,
@@ -842,6 +850,10 @@ proc run(
   # Crash-loud startup (E1): everything validates before anything spawns.
   if command.len == 0:
     stderr.writeLine("subrun: no command specified. Use -- before arguments.")
+    return 2
+
+  if mcp and not tort:
+    stderr.writeLine("subrun: --mcp requires --tort (payload encoding is Tort-only)")
     return 2
 
   var envOverrides: seq[(string, string)]
@@ -868,6 +880,8 @@ proc run(
     verbose: verbose,
     debugMode: detectDebugMode(),
     tort: tort,
+    mcp: mcp,
+    oneWay: oneWay,
   )
   if not dirExists(cfg.cwd):
     error "CWD does not exist", cwd = cfg.cwd
@@ -905,7 +919,9 @@ proc run(
   # pre-exec window.  A host signal landing in this microsecond window kills
   # us by default disposition — the guest is still covered (pdeathsig/EOF).
   var r = Runner(cfg: cfg, hostPid: getppid())
-  if cfg.tort:
+  if cfg.tort and cfg.mcp:
+    r.mcpFilter = initMcpFilter(oneWay = cfg.oneWay)
+  elif cfg.tort:
     r.tortFilter = initTortFilter()   # one-way, junk verbatim, 256 KiB cap
   try:
     r.guestPid = spawnGuest(cfg, pipes)
@@ -933,6 +949,8 @@ const
     "env": "Environment variable KEY=VALUE (repeatable, overrides inherited)",
     "verbose": "Log the startup config dump at info level (stderr)",
     "tort": "Filter guest stdout through Tort (one-way, lossy: JSON docs → Tort text, junk verbatim)",
+    "mcp": "MCP-proxy mode (requires --tort): JSON-RPC envelope stays valid, content[i].text payloads → Tort",
+    "oneWay": "In --mcp mode: lossy payload encode (D18+D19); default is lossless",
     "command": "Command and arguments to run (everything after the first non-option argument or --)",
   }.toTable
   ShortTable = {
