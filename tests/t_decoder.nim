@@ -163,6 +163,36 @@ not a separator""", strict = true),
     checkErr ekUnterminatedHeredoc:
       discard decode("```[2]\nonly one", strict = true)
 
+  test "T04: keyed-table key cell is trailing-trimmed like any cell":
+    checkJson decode("name[1:]{k|v}:\nk1 | 1", strict = true),
+      """{"name":{"k1":{"v":" 1"}}}"""
+
+  test "T04: quoted key cell stays verbatim":
+    checkJson decode("name[1:]{k|v}:\n\"k1 \"| 1", strict = true),
+      """{"name":{"k1 ":{"v":" 1"}}}"""
+
+  test "T05: \\u0001 inside a quoted key must not alias a dotted path":
+    ## joinPath joins segments with '\x01'; a quoted key may legally carry
+    ## '\x01' (\"a\\u0001b\") — without length-prefixing the slots keys collide.
+    checkJson decode("\"a\\u0001b\".x: 1\na.b.x: 2", strict = true),
+      "{\"a\\u0001b\":{\"x\":1},\"a\":{\"b\":{\"x\":2}}}"
+
+  test "T33: bare root value with trailing content is rejected":
+    checkErr ekBadLiteral:
+      discard decode("42\n43", strict = true)
+
+  test "T33: root heredoc with trailing KV content is rejected":
+    checkErr ekBadLiteral:
+      discard decode("```[1]\nx\na: 1", strict = true)
+
+  test "T33: root scalar with trailing comments and blanks decodes":
+    checkJson decode("42\n# tail\n", strict = true), "42"
+
+  test "T33: section shape invariants (leading/trailing DocSep)":
+    checkJson decode("a: 1", strict = true), """{"a":1}"""
+    checkJson decode("a: 1\n---\n", strict = true), """[{"a":1}]"""
+    checkJson decode("---\na: 1", strict = true), """[{},{"a":1}]"""
+
 suite "decoder: negative cases (spec §7)":
   test "duplicate key in strict mode -> DuplicateKey":
     checkErr ekDuplicateKey:

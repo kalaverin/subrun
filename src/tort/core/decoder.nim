@@ -133,9 +133,12 @@ proc applyScope(scope: var seq[PathSeg]; dots: int; segments: seq[PathSeg]; line
 proc joinPath(path: seq[PathSeg]): string =
   ## FinalKey joining per spec §3.1. Defined for []-free paths only (D23):
   ## markers never reach this proc (insertAt dispatches first).
+  ## Segments are LENGTH-PREFIXED (T05): a quoted key may legally contain
+  ## '\x01', so a bare-separator join would alias ["a\x01b"] with ["a","b"].
+  ## Slots-table keys are internal — this form is never serialized.
   var parts: seq[string] = @[]
   for s in path:
-    parts.add s.key
+    parts.add $s.key.len & ':' & s.key
   parts.join("\u0001")
 
 proc insertThroughMarkers(st: var DecodeState; path: seq[PathSeg]; freshFrom: int;
@@ -439,8 +442,10 @@ proc decodeSection(ls: seq[TortLine]; start: int; strict: bool): tuple[obj: Tort
                    "row has " & $cells.len & " cells, schema has " & $columns.len,
                    ls[j].num, 1)
         if keyed:
-          let keyCell = cells[0]
-          if keyCell.strip(leading = false, chars = {' ', '\t'}) == DittoMark:
+          ## T04: the key cell gets the same trailing trim as any cell (§6.3);
+          ## a QUOTED key stays verbatim (parseStringAt owns its content).
+          let keyCell = cells[0].strip(leading = false, chars = {' ', '\t'})
+          if keyCell == DittoMark:
             raiseErr(ekBadLiteral, "ditto mark in keyed column", ls[j].num, 1)
           let k = if keyCell.len > 0 and opensString(keyCell, 0):
                     parseStringAt(keyCell, 0, ls[j].num, 1).val
@@ -483,77 +488,66 @@ proc decodeSection(ls: seq[TortLine]; start: int; strict: bool): tuple[obj: Tort
 
 proc decode*(src: string; strict: bool): TortValue =
   let ls = ttLines.splitLines(src)
-  ## RootValue detection (v0.1.3): the WHOLE document is one keyless value line.
-  var content: seq[TortLine] = @[]
-  var contentIdx: seq[int] = @[]           ## ls index per content entry (T03)
-  var sepCount = 0
-  var skip = 0                                ## D24: heredoc content lines left
+  ## RootValue detection (v0.1.3, T33 single scan): only the FIRST content
+  ## line decides — a keyless first line means the whole document is one bare
+  ## root value (or a root heredoc, T03); anything else goes to sections.
+  ## Heredoc/skip logic is single-sourced in parseKv; no classification
+  ## pre-scan over the whole document remains.
+  var first = -1
+  var sepBefore = false
   for i, l in ls:
-    if skip > 0:
-      dec skip                              ## heredoc content: never blank/comment/sep
-      continue
     if isBlank(l.text) or isComment(l.text):
       continue
     if isDocSep(l.text):
-      inc sepCount
+      sepBefore = true
       continue
-    content.add l
-    contentIdx.add i
-    var delim = '\0'
-    var pos = -1
-    try:
-      (delim, pos) = findKeyEnd(l.text, l.num)
-    except TortError:
-      discard                 ## unclassifiable here (e.g. a fence-starting
-                              ## table row); decodeSection reports it properly
-    if delim == ColonChar:
-      let vs = skipWs(l.text, pos + 1)
-      let hd = parseHeredocHeader(
-        l.text[vs .. ^1].strip(leading = false, chars = {' ', '\t'}),
-        l.num, vs + 1)
-      if hd > 0:
-        skip = hd
-    else:
-      ## T03: a keyless line can be a ROOT heredoc header (no colon region) —
-      ## its N content lines are skipped by the same blind counter (D24).
-      let hd = parseHeredocHeader(
-        l.text.strip(chars = {' ', '\t'}), l.num, 1)
-      if hd > 0:
-        skip = hd
-  if sepCount == 0 and content.len == 1:
-    var delim = '\0'
-    var pos = -1
-    try:
-      (delim, pos) = findKeyEnd(content[0].text, content[0].num)
-    except TortError:
-      discard                 ## fence-starting root line: heredoc check below
-    if delim == '\0' or pos == 0:
-      ## no key region at all: bare root value (root "[]" hits '[' at pos 0)
-      let text = content[0].text
-      let start = skipWs(text, 0)
-      let hd = parseHeredocHeader(
-        text[start .. ^1].strip(leading = false, chars = {' ', '\t'}),
-        content[0].num, start + 1)
-      if hd >= 0:
-        ## T03: root-level heredoc — N lines verbatim, mirrors parseKv (D24).
-        let idx = contentIdx[0]
-        if idx + hd >= ls.len:
-          raiseErr(ekUnterminatedHeredoc,
-                   "EOF before the heredoc's " & $hd & " content lines",
-                   content[0].num, start + 1)
-        var val = ""
-        for k in 1 .. hd:
-          val.add ls[idx + k].text
-          val.add '\n'
-        return ttStr(val)
-      return parseValue(text[start .. ^1], content[0].num, start + 1)
-  ## Sections: N sections → array of N objects; 1 section → the object.
-  if sepCount == 0:
-    return decodeSection(ls, 0, strict).obj
+    first = i
+    break
+  if first < 0:
+    return ttObject(@[])                      ## empty document → {} (G10)
+  var delim = '\0'
+  var pos = -1
+  try:
+    (delim, pos) = findKeyEnd(ls[first].text, ls[first].num)
+  except TortError:
+    discard                                   ## fence-starting root line (T03)
+  if not sepBefore and (delim == '\0' or pos == 0):
+    ## no key region at all: bare root value (root "[]" hits '[' at pos 0).
+    ## Everything after the root value must be blank/comment (T33).
+    let text = ls[first].text
+    let start = skipWs(text, 0)
+    let hd = parseHeredocHeader(
+      text[start .. ^1].strip(leading = false, chars = {' ', '\t'}),
+      ls[first].num, start + 1)
+    var after = first
+    if hd >= 0:
+      ## T03: root-level heredoc — N lines verbatim, mirrors parseKv (D24).
+      if first + hd >= ls.len:
+        raiseErr(ekUnterminatedHeredoc,
+                 "EOF before the heredoc's " & $hd & " content lines",
+                 ls[first].num, start + 1)
+      after = first + hd
+    for k in after + 1 ..< ls.len:
+      if not (isBlank(ls[k].text) or isComment(ls[k].text)):
+        raiseErr(ekBadLiteral, "content after the root value", ls[k].num, 1)
+    if hd >= 0:
+      var val = ""
+      for k in 1 .. hd:
+        val.add ls[first + k].text
+        val.add '\n'
+      return ttStr(val)
+    return parseValue(text[start .. ^1], ls[first].num, start + 1)
+  ## Sections: N sections → array of N objects; NO DocSep anywhere → the bare
+  ## object. A DocSep forces the array form even for one section (a: 1\n---).
   var sections: seq[TortValue] = @[]
+  var anySep = sepBefore
   var i = 0
   while i < ls.len:
     let (obj, next) = decodeSection(ls, i, strict)
     sections.add obj
+    if next < ls.len:
+      anySep = true                          ## decodeSection broke at a DocSep
     i = next + 1                                 ## skip the DocSep line itself
+  if not anySep:
+    return sections[0]
   ttList(sections)
