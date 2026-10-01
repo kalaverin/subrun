@@ -129,6 +129,40 @@ def hello():
 not a separator""", strict = true),
       """{"code":"---\nnot a separator\n"}"""
 
+  test "T01: \\n escape is legal in bare KV values (spec §1.2 qcValue)":
+    checkJson decode("msg: line1\\nline2", strict = true),
+      """{"msg":"line1\nline2"}"""
+
+  test "T01: literal comma escape still yields a single item":
+    checkJson decode("a: x\\,y", strict = true), """{"a":"x,y"}"""
+
+  test "T01: \\n in a list item stays rejected (qcItem has no 'n')":
+    checkErr ekBadEscape:
+      discard decode("list: a\\nb, c", strict = true)
+
+  test "T02: LWW scalar-over-object replace invalidates nested slots":
+    checkJson decode("a.b: 1\na: 2\na.c: 3\na.b: 4", strict = false),
+      """{"a":{"c":3,"b":4}}"""
+
+  test "T02: stale leaf slot after replace does not crash or corrupt":
+    checkJson decode("a.b: 1\na: 2\na.b: 3", strict = false),
+      """{"a":{"b":3}}"""
+
+  test "T02: strict mode still raises before any mutation":
+    checkErr ekDuplicateKey:
+      discard decode("a.b: 1\na: 2\na.b: 3", strict = true)
+
+  test "T03: root-level heredoc decodes (D24)":
+    checkJson decode("```[2]\nline one\nline two", strict = true),
+      "\"line one\\nline two\\n\""
+
+  test "T03: root heredoc with N=0 is the empty string":
+    checkJson decode("```[0]", strict = true), "\"\""
+
+  test "T03: root heredoc EOF short -> UnterminatedHeredoc":
+    checkErr ekUnterminatedHeredoc:
+      discard decode("```[2]\nonly one", strict = true)
+
 suite "decoder: negative cases (spec §7)":
   test "duplicate key in strict mode -> DuplicateKey":
     checkErr ekDuplicateKey:

@@ -202,6 +202,18 @@ proc insertThroughMarkers(st: var DecodeState; path: seq[PathSeg]; freshFrom: in
           raiseErr(ekBadPath, "retained [] over an empty array", line, 1)
         node = node.lVal[^1]
 
+proc dropStaleSlots(st: var DecodeState; key: string) =
+  ## Non-strict LWW invalidation (T02): replacing the value at `key` kills
+  ## every cached child slot of its former subtree (`key\x01...` prefixes) —
+  ## stale indexes would otherwise alias into the new value's siblings.
+  let prefix = key & '\x01'
+  var stale: seq[string]
+  for k in st.slots.keys:
+    if k.startsWith(prefix):
+      stale.add k
+  for k in stale:
+    st.slots.del k
+
 proc insertAt(st: var DecodeState; path: seq[PathSeg]; freshFrom: int; val: TortValue; line: int) =
   ## Insert val at path. []-free: duplicate FinalKey → strict ekDuplicateKey,
   ## non-strict LWW (spec §3.2). With AnonScope markers (D23): append walk,
@@ -221,6 +233,7 @@ proc insertAt(st: var DecodeState; path: seq[PathSeg]; freshFrom: int; val: Tort
           raiseErr(ekDuplicateKey, "key path conflicts with a non-object: " & path[i].key, line, 1)
         child = ttObject(@[])                 ## LWW: non-object replaced by object
         node.oVal[st.slots[objKey]][1] = child
+        dropStaleSlots(st, objKey)            ## T02: kill former subtree slots
     else:
       child = ttObject(@[])
       st.slots[objKey] = node.oVal.len
@@ -231,6 +244,7 @@ proc insertAt(st: var DecodeState; path: seq[PathSeg]; freshFrom: int; val: Tort
     if st.strict:
       raiseErr(ekDuplicateKey, "duplicate key: " & path[^1].key, line, 1)
     node.oVal[st.slots[leafKey]][1] = val     ## LWW keeps position
+    dropStaleSlots(st, leafKey)               ## T02: kill former subtree slots
     return
   st.slots[leafKey] = node.oVal.len
   node.oVal.add (path[^1].key, val)
@@ -244,7 +258,10 @@ proc parseValue(raw: string; line: int; colBase: int): TortValue =
     return ttObject(@[])
   if trimmed == EmptyArrToken:
     return ttList(@[])
-  var items = splitUnescaped(trimmed, CommaChar, qcItem, line, colBase)
+  ## Split validation uses qcValue (superset {'n','\\',','} of qcItem): a bare
+  ## KV value legally carries \n and \, (spec §1.2/§2 note 2). List ITEMS are
+  ## still classified with qcItem below, so \n inside an item stays rejected.
+  var items = splitUnescaped(trimmed, CommaChar, qcValue, line, colBase)
   if items.len > 1:
     if items[^1].len == 0:
       items.setLen(items.len - 1)            ## D7: one trailing comma is legal
@@ -468,9 +485,10 @@ proc decode*(src: string; strict: bool): TortValue =
   let ls = ttLines.splitLines(src)
   ## RootValue detection (v0.1.3): the WHOLE document is one keyless value line.
   var content: seq[TortLine] = @[]
+  var contentIdx: seq[int] = @[]           ## ls index per content entry (T03)
   var sepCount = 0
   var skip = 0                                ## D24: heredoc content lines left
-  for l in ls:
+  for i, l in ls:
     if skip > 0:
       dec skip                              ## heredoc content: never blank/comment/sep
       continue
@@ -480,12 +498,13 @@ proc decode*(src: string; strict: bool): TortValue =
       inc sepCount
       continue
     content.add l
+    contentIdx.add i
     var delim = '\0'
     var pos = -1
     try:
       (delim, pos) = findKeyEnd(l.text, l.num)
     except TortError:
-      continue                  ## unclassifiable here (e.g. a fence-starting
+      discard                 ## unclassifiable here (e.g. a fence-starting
                               ## table row); decodeSection reports it properly
     if delim == ColonChar:
       let vs = skipWs(l.text, pos + 1)
@@ -494,12 +513,39 @@ proc decode*(src: string; strict: bool): TortValue =
         l.num, vs + 1)
       if hd > 0:
         skip = hd
+    else:
+      ## T03: a keyless line can be a ROOT heredoc header (no colon region) —
+      ## its N content lines are skipped by the same blind counter (D24).
+      let hd = parseHeredocHeader(
+        l.text.strip(chars = {' ', '\t'}), l.num, 1)
+      if hd > 0:
+        skip = hd
   if sepCount == 0 and content.len == 1:
-    let (delim, pos) = findKeyEnd(content[0].text, content[0].num)
+    var delim = '\0'
+    var pos = -1
+    try:
+      (delim, pos) = findKeyEnd(content[0].text, content[0].num)
+    except TortError:
+      discard                 ## fence-starting root line: heredoc check below
     if delim == '\0' or pos == 0:
       ## no key region at all: bare root value (root "[]" hits '[' at pos 0)
       let text = content[0].text
       let start = skipWs(text, 0)
+      let hd = parseHeredocHeader(
+        text[start .. ^1].strip(leading = false, chars = {' ', '\t'}),
+        content[0].num, start + 1)
+      if hd >= 0:
+        ## T03: root-level heredoc — N lines verbatim, mirrors parseKv (D24).
+        let idx = contentIdx[0]
+        if idx + hd >= ls.len:
+          raiseErr(ekUnterminatedHeredoc,
+                   "EOF before the heredoc's " & $hd & " content lines",
+                   content[0].num, start + 1)
+        var val = ""
+        for k in 1 .. hd:
+          val.add ls[idx + k].text
+          val.add '\n'
+        return ttStr(val)
       return parseValue(text[start .. ^1], content[0].num, start + 1)
   ## Sections: N sections → array of N objects; 1 section → the object.
   if sepCount == 0:
