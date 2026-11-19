@@ -1,6 +1,120 @@
 {
   "version": 2,
   "packages": {
+    "results": {
+      "version": "0.5.1",
+      "vcsRevision": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
+      "url": "https://github.com/arnetheduck/nim-results",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "a9c011f74bc9ed5c91103917b9f382b12e82a9e7"
+      }
+    },
+    "unittest2": {
+      "version": "0.3.0",
+      "vcsRevision": "19701632b4f287b3012a5e435a9d829b0f66c605",
+      "url": "https://github.com/status-im/nim-unittest2",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "a14b3648dc8bbbaefd0b16d9567b567cc264b042"
+      }
+    },
+    "stew": {
+      "version": "0.6.5",
+      "vcsRevision": "29c11c7264289cc4c423f0e0662effbc5fdc6f61",
+      "url": "https://github.com/status-im/nim-stew",
+      "downloadMethod": "git",
+      "dependencies": [
+        "results",
+        "unittest2"
+      ],
+      "checksums": {
+        "sha1": "a3a45ca328b113b531f4d3531d928a6f06eb3d71"
+      }
+    },
+    "faststreams": {
+      "version": "0.6.0",
+      "vcsRevision": "5bdef9939b483435a61aa91a6422c1a9852127b4",
+      "url": "https://github.com/status-im/nim-faststreams",
+      "downloadMethod": "git",
+      "dependencies": [
+        "stew",
+        "unittest2"
+      ],
+      "checksums": {
+        "sha1": "adcba79189cc1f70798689b2e441053e119e1045"
+      }
+    },
+    "serialization": {
+      "version": "0.5.5",
+      "vcsRevision": "937a65c19fc49a5f79e2ecd89094d367b6ca0e1b",
+      "url": "https://github.com/status-im/nim-serialization",
+      "downloadMethod": "git",
+      "dependencies": [
+        "faststreams",
+        "stew",
+        "unittest2"
+      ],
+      "checksums": {
+        "sha1": "a5eadb19d36b85e3e712c98990476d7d1445f88b"
+      }
+    },
+    "json_serialization": {
+      "version": "0.5.0",
+      "vcsRevision": "5bd1d25bf33ad63093dfd949435bc92d6d722a75",
+      "url": "https://github.com/status-im/nim-json-serialization",
+      "downloadMethod": "git",
+      "dependencies": [
+        "faststreams",
+        "results",
+        "serialization",
+        "stew"
+      ],
+      "checksums": {
+        "sha1": "6f94d86e67f3ede9f3dda2af20ef7fe4d4430bfc"
+      }
+    },
+    "testutils": {
+      "version": "0.9.0",
+      "vcsRevision": "4c7252fcd27f72d523e498fba5cf757d101cc3aa",
+      "url": "https://github.com/status-im/nim-testutils",
+      "downloadMethod": "git",
+      "dependencies": [
+        "results",
+        "stew",
+        "unittest2"
+      ],
+      "checksums": {
+        "sha1": "f8f810f03ccec7ab2c55e73fbecdee48c9a55f9d"
+      }
+    },
+    "chronicles": {
+      "version": "0.12.4",
+      "vcsRevision": "45c823b8af409f82fa35fd5e1f6a7c9a06fe3137",
+      "url": "https://github.com/status-im/nim-chronicles",
+      "downloadMethod": "git",
+      "dependencies": [
+        "faststreams",
+        "serialization",
+        "json_serialization",
+        "testutils"
+      ],
+      "checksums": {
+        "sha1": "fcc95d4ff52d5e4288a6549331c25a299d56f5c0"
+      }
+    },
+    "cligen": {
+      "version": "1.11.0",
+      "vcsRevision": "bdce5ed5ae8b222321945648b30c39fbc2bed272",
+      "url": "https://github.com/c-blake/cligen.git",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "7ab5190b7ea21aab752bcd03f2ca2b71b048ec4f"
+      }
+    },
     "yyjson": {
       "version": "1.0.1",
       "vcsRevision": "600ceee473dec2035c27fb6c75963aadf6182fcd",

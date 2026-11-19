@@ -4,6 +4,8 @@ env:
 	@direnv allow . || true
 	@mise trust --yes mise.toml
 	@mise install
+	@nimble lock
+	@nimble setup
 
 build:
 	@mkdir bin/ || true
