@@ -503,14 +503,17 @@ proc decode*(src: string; strict: bool): TortValue =
       continue
     first = i
     break
-  if first < 0:
+  if first < 0 and not sepBefore:
     return ttObject(@[])                      ## empty document → {} (G10)
+  ## seps-only document (first < 0, sepBefore): falls through to the sections
+  ## loop — decodeSection breaks at each DocSep, yielding [{}], [{},{}], ...
   var delim = '\0'
   var pos = -1
-  try:
-    (delim, pos) = findKeyEnd(ls[first].text, ls[first].num)
-  except TortError:
-    discard                                   ## fence-starting root line (T03)
+  if first >= 0:
+    try:
+      (delim, pos) = findKeyEnd(ls[first].text, ls[first].num)
+    except TortError:
+      discard                                 ## fence-starting root line (T03)
   if not sepBefore and (delim == '\0' or pos == 0):
     ## no key region at all: bare root value (root "[]" hits '[' at pos 0).
     ## Everything after the root value must be blank/comment (T33).

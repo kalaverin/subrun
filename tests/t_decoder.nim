@@ -192,6 +192,8 @@ not a separator""", strict = true),
     checkJson decode("a: 1", strict = true), """{"a":1}"""
     checkJson decode("a: 1\n---\n", strict = true), """[{"a":1}]"""
     checkJson decode("---\na: 1", strict = true), """[{},{"a":1}]"""
+    checkJson decode("---", strict = true), "[{}]"          ## seps-only doc
+    checkJson decode("---\n---", strict = true), "[{},{}]"
 
 suite "decoder: negative cases (spec §7)":
   test "duplicate key in strict mode -> DuplicateKey":
