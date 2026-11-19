@@ -151,3 +151,20 @@ suite "e2e: subrun proxy":
     let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--",
                                  "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 5"])
     check c == 0
+
+  test "T9: symlink-invoked guest keeps its caller-visible argv[0]":
+    ## Regression for the argv0 symlink fix: findExe must not resolve the
+    ## symlink, otherwise a multicall guest receives its target's name in
+    ## argv[0] and dispatches the applet from argv[1].
+    if not fileExists(SubrunBin):
+      skip()
+    let realSleep = findExe("sleep", followSymlinks = false)
+    if realSleep.len == 0:
+      skip()
+    let dir = getTempDir() / ("subrun_t9_" & $getCurrentProcessId())
+    createDir(dir)
+    let link = dir / "sleep"
+    createSymlink(realSleep, link)
+    let (_, c) = run(SubrunBin, ["--", link, "1"])
+    check c == 0
+    removeDir(dir)

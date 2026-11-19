@@ -941,13 +941,13 @@ proc run(
       stderr.writeLine("subrun: " & ex.msg)
       return 2
 
-  let binaryPath = findExe(command[0])
+  let binaryPath = findExe(command[0], followSymlinks = false)
   if binaryPath.len == 0:
     error "Binary not found", binary = command[0]
     return 126
 
   var cfg = Config(
-    binary: expandFilename(binaryPath),
+    binary: normalizedPath(absolutePath(expandTilde(binaryPath))),
     args: command[1 .. ^1],
     cwd: resolveCwd(cwd),
     logDir: resolveLogDir(logDir),
@@ -1050,7 +1050,7 @@ clCfg.argEndsOpts = true
 dispatchGen(run, cmdName = "subrun", help = HelpTable, short = ShortTable,
             dispatchName = "dispatchRun")
 
-when isMainModule:
+when isMainModule and not defined(subrunTesting):
   try:
     let exitCode = dispatchRun(commandLineParams())
     if exitCode >= -128 and exitCode <= 127:
