@@ -2,7 +2,7 @@
 ## Skipped with a clear message when the binaries are not built (make build).
 
 import unittest2
-import std/[os, osproc, strutils]
+import std/[os, osproc, strutils, times]
 import tort/adapters/yyjson_bridge
 
 const
@@ -95,3 +95,59 @@ suite "e2e: subrun proxy":
     let (o, c) = run(SubrunBin, ["--tort", "--", "/bin/echo", """{"a": 1}"""])
     check c == 0
     check "a: 1" in o
+
+  test "T1: --timeout kills a long guest (143)":
+    if not fileExists(SubrunBin):
+      skip()
+    let t0 = epochTime()
+    let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--", "/bin/sleep", "5"])
+    let dt = epochTime() - t0
+    check c == 143
+    check dt >= 0.3 and dt < 2.0
+
+  test "T2: guest exiting before --timeout keeps its code":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "30", "--", "/bin/sh", "-c", "exit 0"])
+    check c == 0
+
+  test "T3: --timeout 0 is unlimited":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "0", "--", "/bin/sh", "-c", "exit 0"])
+    check c == 0
+
+  test "T4: negative --timeout rejected at startup":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "-1", "--", "/bin/true"])
+    check c == 2
+
+  test "T5: guest TERM-trap during grace exits 0 (explicit --signal TERM)":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--signal", "TERM", "--",
+                                 "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 5"])
+    check c == 0
+
+  test "T6: --signal SIGHUP kills with 129":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--signal", "SIGHUP", "--",
+                                 "/bin/sleep", "5"])
+    check c == 129
+
+  test "T7: invalid --signal rejected at startup":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c1) = run(SubrunBin, ["--signal", "BOGUS", "--", "/bin/true"])
+    check c1 == 2
+    let (_, c2) = run(SubrunBin, ["--signal", "SIGKILL", "--", "/bin/true"])
+    check c2 == 2
+
+  test "T8: default graceful signal is TERM":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--",
+                                 "/bin/sh", "-c", "trap 'exit 0' TERM; sleep 5"])
+    check c == 0

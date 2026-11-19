@@ -134,7 +134,8 @@ type
     shsNone              # no shutdown in progress
     shsForwardedSignal   # deadly signal already delivered by forwarding —
                          # we do NOT send our own SIGTERM (no invented events)
-    shsHostDied          # ppid-poll detected host death — we SIGTERM the group
+    shsHostDied          # ppid-poll detected host death — we signal the group
+    shsTimeout           # --timeout lifetime limit expired — graceful signal
 
   Config = object
     binary: string
@@ -143,6 +144,8 @@ type
     logDir: string        # resolved absolute, anchored at invocation cwd (S4.4)
     graceTimeout: float
     hardTimeout: float
+    timeout: float           # 0.0 = unlimited guest lifetime (--timeout)
+    signal: cint             # graceful signal for wrapper-initiated shutdown
     env: seq[(string, string)]
     verbose: bool
     debugMode: bool       # derived once at startup (S5.5)
@@ -165,6 +168,7 @@ type
     lastStatus: cint      # single writer: the reap in the loop
     shutdown: ShutdownSource
     shutdownStart: MonoTime
+    startTime: MonoTime       # runLoop entry: --timeout anchor (monotonic)
     sigkillSent: bool
     streams: array[FdKind, Stream]
     pollFds: array[6, TPollFd]     # rebuilt from live state every iteration
@@ -273,6 +277,42 @@ proc parseEnv(s: string): (string, string) =
   if idx < 0:
     raise newException(ValueError, "invalid env format (expected KEY=VALUE): " & s)
   result = (s[0 ..< idx], s[idx + 1 .. ^1])
+
+proc parseSignal(s: string): cint =
+  ## "SIGTERM"/"TERM"/"term" or a number (1..31). Raises ValueError on
+  ## unknown names, out-of-range numbers, and uncatchable KILL/STOP — the
+  ## caller converts that into a startup error (E1) before anything spawns.
+  var name = s.strip.toUpperAscii
+  if name.startsWith("SIG"):
+    name = name[3 .. ^1]
+  if name == "HUP": return SIGHUP
+  elif name == "INT": return SIGINT
+  elif name == "QUIT": return SIGQUIT
+  elif name == "TERM": return SIGTERM
+  elif name == "USR1": return SIGUSR1
+  elif name == "USR2": return SIGUSR2
+  elif name == "PIPE": return SIGPIPE
+  elif name == "ALRM": return SIGALRM
+  elif name == "CHLD": return SIGCHLD
+  elif name == "CONT": return SIGCONT
+  elif name == "TSTP": return SIGTSTP
+  elif name == "TTIN": return SIGTTIN
+  elif name == "TTOU": return SIGTTOU
+  elif name == "URG": return SIGURG
+  elif name == "XCPU": return SIGXCPU
+  elif name == "XFSZ": return SIGXFSZ
+  elif name == "VTALRM": return SIGVTALRM
+  elif name == "PROF": return SIGPROF
+  elif name == "WINCH": return SIGWINCH
+  elif name == "IO": return SIGIO
+  else:
+    let n = parseInt(name)               # raises ValueError on garbage
+    if n < 1 or n > 31:
+      raise newException(ValueError, "signal number out of range 1..31: " & s)
+    result = cint(n)
+  if result == SIGKILL or result == SIGSTOP:
+    raise newException(ValueError,
+      "signal cannot be caught, forbidden as graceful signal: " & s)
 
 proc resolveCwd(cwd: string): string =
   ## Explicit --cwd wins; otherwise the invocation cwd is preserved.
@@ -504,9 +544,10 @@ proc beginShutdown(r: var Runner, src: ShutdownSource) =
   s.buf.setLen(0)
   s.readOff = 0
   s.state = ssClosed
-  if src == shsHostDied:
-    # Nobody else will manage the guest: the graceful signal is ours to send.
-    signalGuestGroup(r, SIGTERM)
+  if src in {shsHostDied, shsTimeout}:
+    # Nobody else will manage the guest: the graceful signal is ours to send
+    # (host died, or the --timeout lifetime limit chose it for us).
+    signalGuestGroup(r, r.cfg.signal)
 
 proc tickEscalation(r: var Runner) =
   ## V2 timeline.  Group signals only while the guest lives; the hard-timeout
@@ -531,6 +572,17 @@ proc checkHostAlive(r: var Runner) =
   if getppid() != r.hostPid:
     info "Host died (reparented)", hostPid = int(r.hostPid)
     beginShutdown(r, shsHostDied)
+
+proc checkTimeout(r: var Runner) =
+  ## Lifetime limit (--timeout): on expiry initiate the standard shutdown.
+  ## Idempotent via beginShutdown — a shutdown already in progress owns the
+  ## V2 timeline and this is a no-op.
+  if r.cfg.timeout <= 0:
+    return
+  let elapsedSec = float(inMilliseconds(getMonoTime() - r.startTime)) / 1000.0
+  if elapsedSec >= r.cfg.timeout:
+    info "Guest lifetime timeout expired", timeout = r.cfg.timeout
+    beginShutdown(r, shsTimeout)
 
 proc toggleSessionLog(r: var Runner, sig: cint) =
   ## Debug-mode only (consumed, never forwarded — stage 03.3).
@@ -737,14 +789,24 @@ proc cadence(r: Runner): cint =
   ## Dynamic poll timeout (stage 09.6): shutdown always ticks at 100ms;
   ## steady state backs off by idle time.  Signal/guest-death latency is
   ## unaffected — EINTR and the SIGCHLD flag wake poll at any backoff.
+  ## An armed --timeout caps the backoff at the time remaining to the
+  ## deadline (1ms floor), so the lifetime limit fires on the next tick,
+  ## never one idle backoff late.
   if r.shutdown != shsNone:
     return PollMsActive
+  var ms: cint
   let idleSec = int(inSeconds(getMonoTime() - r.lastActivity))
   if idleSec >= IdleThreshold2Sec:
-    return PollMsIdle2
-  if idleSec >= IdleThreshold1Sec:
-    return PollMsIdle1
-  return PollMsActive
+    ms = PollMsIdle2
+  elif idleSec >= IdleThreshold1Sec:
+    ms = PollMsIdle1
+  else:
+    ms = PollMsActive
+  if r.cfg.timeout > 0:
+    let remainMs = int(r.cfg.timeout * 1000.0) -
+                   int(inMilliseconds(getMonoTime() - r.startTime))
+    ms = min(ms, cint(max(remainMs, 1)))
+  return ms
 
 # -----------------------------------------------------------------------------
 # Main loop & finalize
@@ -773,6 +835,7 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
   # (No stream-head injection: the Tort preamble lives only in --mcp mode,
   #  inside the first transformed content[i].text — McpFilter.preambleDone.)
   r.lastActivity = getMonoTime()
+  r.startTime = getMonoTime()
 
   # Born-orphan rule (stage 19.1): hostPid==1 means the host died before our
   # first getppid() — a guest nobody manages is torn down per V2.
@@ -800,6 +863,7 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
         break
     else:
       checkHostAlive(r)
+      checkTimeout(r)
 
     let nfds = rebuildPollSet(r)
     let timeoutMs = cadence(r)
@@ -830,6 +894,8 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
 proc run(
     graceTimeout: float = DefaultGraceTimeout,
     hardTimeout: float = DefaultHardTimeout,
+    timeout: float = 0.0,
+    signal: string = "SIGTERM",
     cwd: string = "",
     logDir: string = "var/log/subrun",
     env: seq[string] = @[],
@@ -856,6 +922,17 @@ proc run(
     stderr.writeLine("subrun: --mcp requires --tort (payload encoding is Tort-only)")
     return 2
 
+  if timeout < 0:
+    stderr.writeLine("subrun: --timeout must be >= 0")
+    return 2
+
+  var gracefulSig: cint
+  try:
+    gracefulSig = parseSignal(signal)
+  except CatchableError as ex:
+    stderr.writeLine("subrun: invalid --signal: " & ex.msg)
+    return 2
+
   var envOverrides: seq[(string, string)]
   for e in env:
     try:
@@ -876,6 +953,8 @@ proc run(
     logDir: resolveLogDir(logDir),
     graceTimeout: graceTimeout,
     hardTimeout: hardTimeout,
+    timeout: timeout,
+    signal: gracefulSig,
     env: envOverrides,
     verbose: verbose,
     debugMode: detectDebugMode(),
@@ -898,6 +977,7 @@ proc run(
     info "Config", binary = cfg.binary, args = cfg.args, cwd = cfg.cwd,
          logDir = cfg.logDir, debugMode = cfg.debugMode,
          graceTimeout = cfg.graceTimeout, hardTimeout = cfg.hardTimeout,
+         timeout = cfg.timeout, signal = int(cfg.signal),
          tort = cfg.tort
 
   saveFdFlags()
@@ -944,6 +1024,8 @@ const
   HelpTable = {
     "graceTimeout": "Timeout for graceful shutdown (SIGTERM) before SIGKILL escalation",
     "hardTimeout": "Timeout for bounded give-up, from shutdown start",
+    "timeout": "Max guest lifetime in seconds; on expiry the graceful shutdown policy applies (0 = unlimited, default)",
+    "signal": "Graceful signal for wrapper-initiated shutdown: name (TERM, SIGHUP) or number 1..31; default SIGTERM",
     "cwd": "Working directory (default: caller's current directory)",
     "logDir": "Directory for session/operational logs, resolved against the invocation cwd",
     "env": "Environment variable KEY=VALUE (repeatable, overrides inherited)",
