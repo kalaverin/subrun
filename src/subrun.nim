@@ -76,6 +76,13 @@ const
   IdleThreshold1Sec = 60
   IdleThreshold2Sec = 600
 
+# Version comes from git tags at compile time: "v0.2.0" on a tag,
+# "v0.2.0-3-gabc1234" after it, bare commit hash without tags.
+# Fallback 0.0.0 when built outside the git tree. staticExec runs in the
+# compile directory (project root under nimble/make).
+const Version = staticExec(
+  "git describe --tags --always --dirty 2>/dev/null || echo 0.0.0").strip
+
 # -----------------------------------------------------------------------------
 # Catchable signals we handle: forward-all-catchable minus SIGPIPE (SIG_IGN)
 # and minus the synchronous fault class {SEGV, BUS, FPE, ILL, TRAP, EMT, SYS}
@@ -1046,6 +1053,7 @@ const
 # guest command, including its flags — matches Python argparse.REMAINDER and
 # the way MCP callers invoke subrun without a leading "--".
 clCfg.argEndsOpts = true
+clCfg.version = Version    # git-describe at compile time; overrides NimblePkgVersion
 
 dispatchGen(run, cmdName = "subrun", help = HelpTable, short = ShortTable,
             dispatchName = "dispatchRun")
