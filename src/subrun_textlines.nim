@@ -59,19 +59,22 @@ proc fastTime(): times.Time =
   initTime(int64(tv.tv_sec), int(tv.tv_usec) * 1000)
 
 proc writeTs(r: var LogRecord) =
-  ## Replacement for the upstream template: same output layout, POSIX-correct
-  ## clock source. Named uniquely on purpose: chronicles' textformats exports
-  ## a `writeSpaceAndTs` TEMPLATE that silently out-resolved this proc (the
-  ## stream printed CLOCK_UPTIME on FreeBSD — proven in the generated C);
-  ## a unique name removes the overload competition entirely.
+  ## Replacement for the upstream template: POSIX-correct clock source
+  ## (gettimeofday), output layout per owner spec — UTC with a literal Z
+  ## and 5 fractional digits ("2026-11-21 21:02:09.48000Z"). Named uniquely
+  ## on purpose: chronicles' textformats exports a `writeSpaceAndTs` TEMPLATE
+  ## that silently out-resolved this proc (the stream printed CLOCK_UPTIME on
+  ## FreeBSD — proven in the generated C); a unique name removes the overload
+  ## competition entirely.
   when r.format.timestamps != NoTimestamps:
     r.stream.write " "
     when r.format.timestamps == UnixTime:
       r.stream.writeText formatFloat(epochTime(), ffDecimal, 6)
-    elif r.format.timestamps == RfcUtcTime:
-      r.stream.write fastTime().utc.format("yyyy-MM-dd HH:mm:ss'.'fff") & "Z"
     else:
-      r.stream.write fastTime().local.format("yyyy-MM-dd HH:mm:ss'.'fffzzz")
+      # Nim's time patterns allow 3/6/9 fractional digits; the owner spec
+      # wants 5 — take 6 (microseconds) and drop the last digit.
+      let ts = fastTime().utc.format("yyyy-MM-dd HH:mm:ss'.'ffffff")
+      r.stream.write ts[0 .. ^2] & "Z"
 
 proc writeValueImpl[T](
     r: var LogRecord, value: T, deref: static bool, quoted: static bool
