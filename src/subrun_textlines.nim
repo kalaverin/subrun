@@ -8,8 +8,8 @@
 ## with the exact same layout as upstream RfcTime/RfcUtcTime.
 ##
 ## Maintenance: on a chronicles upgrade, re-vendor `textlines.nim` and keep
-## `writeSpaceAndTs` below. Everything else must stay byte-identical to
-## upstream so log output does not drift.
+## `writeTs` below (named uniquely — see its doc comment). Everything else
+## must stay byte-identical to upstream so log output does not drift.
 
 import
   std/[strutils, typetraits, terminal, times],
@@ -58,9 +58,12 @@ proc fastTime(): times.Time =
   discard gettimeofday(tv)
   initTime(int64(tv.tv_sec), int(tv.tv_usec) * 1000)
 
-proc writeSpaceAndTs(r: var LogRecord) =
+proc writeTs(r: var LogRecord) =
   ## Replacement for the upstream template: same output layout, POSIX-correct
-  ## clock source.
+  ## clock source. Named uniquely on purpose: chronicles' textformats exports
+  ## a `writeSpaceAndTs` TEMPLATE that silently out-resolved this proc (the
+  ## stream printed CLOCK_UPTIME on FreeBSD — proven in the generated C);
+  ## a unique name removes the overload competition entirely.
   when r.format.timestamps != NoTimestamps:
     r.stream.write " "
     when r.format.timestamps == UnixTime:
@@ -178,7 +181,7 @@ proc initLogRecord*(r: var LogRecord, level: LogLevel, topics, msg: string) =
 
   # Log level comes first - allows for easy regex match with ^
   base(r).writeLogLevelMarker(level)
-  writeSpaceAndTs(r)
+  writeTs(r)
 
   r.stream.write(' ')
   base(r).applyStyle(styleBright)
