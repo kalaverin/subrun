@@ -149,6 +149,7 @@ type
     args: seq[string]
     cwd: string           # resolved absolute; --cwd or invocation cwd (S4.1)
     logDir: string        # resolved absolute, anchored at invocation cwd (S4.4)
+    title: string         # --title: override the wrapper's process name
     graceTimeout: float
     hardTimeout: float
     timeout: float           # 0.0 = unlimited guest lifetime (--timeout)
@@ -905,6 +906,7 @@ proc run(
     signal: string = "SIGTERM",
     cwd: string = "",
     logDir: string = "var/log/subrun",
+    title: string = "",
     env: seq[string] = @[],
     verbose: bool = false,
     tort: bool = false,
@@ -958,6 +960,7 @@ proc run(
     args: command[1 .. ^1],
     cwd: resolveCwd(cwd),
     logDir: resolveLogDir(logDir),
+    title: title,
     graceTimeout: graceTimeout,
     hardTimeout: hardTimeout,
     timeout: timeout,
@@ -973,7 +976,9 @@ proc run(
     error "CWD does not exist", cwd = cfg.cwd
     return 1
 
-  setProcessTitle(extractFilename(paramStr(0)) & "[" & extractFilename(cfg.binary) & "]")
+  setProcessTitle(if cfg.title.len > 0: cfg.title
+                  else: extractFilename(paramStr(0)) & "[" &
+                        extractFilename(cfg.binary) & "]")
 
   info "Wrapper starting", pid = getCurrentProcessId(), hostPid = getppid()
   if cfg.debugMode:
@@ -1034,6 +1039,7 @@ const
     "timeout": "Max guest lifetime in seconds; on expiry the graceful shutdown policy applies (0 = unlimited, default)",
     "signal": "Graceful signal for wrapper-initiated shutdown: name (TERM, SIGHUP) or number 1..31; default SIGTERM",
     "cwd": "Working directory (default: caller's current directory)",
+    "title": "Override the wrapper's process name (default: subrun[binary])",
     "logDir": "Directory for session/operational logs, resolved against the invocation cwd",
     "env": "Environment variable KEY=VALUE (repeatable, overrides inherited)",
     "verbose": "Log the startup config dump at info level (stderr)",

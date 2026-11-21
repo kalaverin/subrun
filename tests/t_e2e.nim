@@ -168,3 +168,11 @@ suite "e2e: subrun proxy":
     let (_, c) = run(SubrunBin, ["--", link, "1"])
     check c == 0
     removeDir(dir)
+
+  test "T10: --title overrides the wrapper process name":
+    if not fileExists(SubrunBin):
+      skip()
+    let (o, c) = run(SubrunBin, ["--title", "mytitle", "--",
+                                 "/bin/sh", "-c", "ps -o comm= -p $PPID"])
+    check c == 0
+    check "mytitle" in o
