@@ -751,6 +751,7 @@ proc tryFlush(r: var Runner, kind: FdKind) =
   if s.state == ssDraining and pending(s[]) == 0:
     # EOF timing fidelity (S1.3): for outputs dstFd is our own fd 1/2 —
     # closing it gives the host an immediate EOF, not one deferred to exit.
+    info "Output drained", fd = $kind
     closeHostFd(s.dstFd)
     s.dstFd = -1
     s.state = ssClosed
@@ -762,6 +763,7 @@ proc onSourceEof(r: var Runner, kind: FdKind) =
   if kind == fkStdin:
     # Host stdin EOF: the unwritten buffer is dropped (S1.4 — data addressed
     # to a departing reader); the guest receives EOF.
+    info "Host stdin EOF"
     closeFd(s.dstFd)              # guest pipe — not a host fd, no flag restore
     s.dstFd = -1
     s.buf.setLen(0)
@@ -1081,6 +1083,7 @@ proc run(
 
   info "Guest launched", pid = int(r.guestPid)
   let code = runLoop(r, pipes)
+  info "Wrapper exiting", code = code
   restoreFdFlags()
   return code
 
