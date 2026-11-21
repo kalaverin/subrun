@@ -8,11 +8,14 @@ import
   std/[strutils, tables],
   pkg/chronicles,
   tort/tort,
-  tort/adapters/yyjson_bridge
+  tort/adapters/yyjson_bridge,
+  subrun_textlines
 
-# Same sink as subrun.nim: stdout is the guest's data channel, wrapper logs
-# go to stderr (S1.5, J4).
-logStream wrapperLog[textlines[stderr]]
+# Same sink as subrun.nim (the vendored POSIX-correct RFC-timestamp format —
+# see src/subrun_textlines.nim; bare chronicles `textlines` reads CLOCK_UPTIME
+# on FreeBSD): stdout is the guest's data channel, wrapper logs go to stderr
+# (S1.5, J4).
+logStream wrapperLog[subrun_textlines[stderr]]
 
 logScope:
   stream = wrapperLog
@@ -39,6 +42,14 @@ type
     inWarned: bool
 
 proc initMcpFilter*(lineLimit = DefaultLineLimit; oneWay = false): McpFilter =
+  ## Visibility contract (review HIGH-4): the transform strips `outputSchema`
+  ## from tools/list and deduplicates `structuredContent` when `content`
+  ## exists — the fields are named here so the removals are observable in
+  ## the wrapper log, not silent.
+  info "MCP filter initialized",
+       stripsOutputSchema = true,
+       dropsStructuredContent = true,
+       oneWay = oneWay
   McpFilter(lineLimit: lineLimit, oneWay: oneWay)
 
 # -----------------------------------------------------------------------------

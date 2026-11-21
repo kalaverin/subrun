@@ -72,12 +72,13 @@ proc cexit(status: cint) {.importc: "exit", header: "<stdlib.h>".}
 
 const
   DefaultGraceTimeout = 5.0
-  DefaultHardTimeout = 10.0
+  DefaultHardTimeout = 5.0
   ReadChunk = 65536              # one read(2) size
   StreamCap = 1024 * 1024        # per-direction buffer ceiling (~3 MiB total)
   PollMsActive = 100             # cadence: active / shutdown
   PollMsIdle1 = 1000             # cadence: idle >= 60s
   PollMsIdle2 = 3000             # cadence: idle >= 600s
+  PollMsMax = int32.high.int     # poll(2) timeout arg is a cint
   IdleThreshold1Sec = 60
   IdleThreshold2Sec = 600
 
@@ -177,11 +178,12 @@ type
     guestPid: Pid         # == guest pgid after setpgid(0,0) — no separate field
     hostPid: Pid          # our ppid at start
     guestExited: bool
-    gaveUp: bool
+    reapFailed: bool      # waitpid error paths: guest fate UNKNOWN, exit 1
     lastStatus: cint      # single writer: the reap in the loop
     shutdown: ShutdownSource
     shutdownStart: MonoTime
     startTime: MonoTime       # runLoop entry: --timeout anchor (monotonic)
+    termSent: bool            # V3: SIGTERM stage fired (at grace expiry)
     sigkillSent: bool
     streams: array[FdKind, Stream]
     pollFds: array[6, TPollFd]     # rebuilt from live state every iteration
@@ -191,6 +193,13 @@ type
     lastActivity: MonoTime
     tortFilter: TortFilter  # live only when cfg.tort and not cfg.mcp
     mcpFilter: McpFilter    # live only when cfg.tort and cfg.mcp
+
+static:
+  # The poll set is rebuilt from live state every iteration; its capacity is
+  # exactly 2 entries per FdKind (src + dst). A new FdKind member must fail
+  # the build here, not overflow the arrays at runtime.
+  doAssert Runner.pollFds.len == 2 * (ord(high(FdKind)) + 1)
+  doAssert Runner.pollMap.len == Runner.pollFds.len
 
 # -----------------------------------------------------------------------------
 # Low-level fd helpers
@@ -361,9 +370,10 @@ proc openLogger(r: var Runner) =
   let base = extractFilename(r.cfg.binary)
   let dir = r.cfg.logDir / base
   inc r.logSessionCounter
+  var path = ""
   try:
     createDir(dir)
-    let path = dir / (ts & "_" & $pid & "_" & $r.logSessionCounter & ".log")
+    path = dir / (ts & "_" & $pid & "_" & $r.logSessionCounter & ".log")
     r.logger.file = open(path, fmWrite)
     r.logger.enabled = true
     r.logger.sectionOpen = false
@@ -372,26 +382,45 @@ proc openLogger(r: var Runner) =
     # Logging is subordinate to proxying (S5.1): failure never stops us.
     warn "Failed to start logging", error = ex.msg
     r.logger.enabled = false
+  if r.logger.enabled:
+    try:
+      setFilePermissions(path, {fpUserRead, fpUserWrite})
+    except CatchableError as ex:
+      # Best-effort hardening only: the log works with umask permissions.
+      warn "Session log permissions not tightened", path = path, error = ex.msg
 
 proc closeLogger(r: var Runner) =
   if not r.logger.enabled:
     return
-  close(r.logger.file)
+  try:
+    close(r.logger.file)
+    info "Logging stopped"
+  except CatchableError as ex:
+    # The file may already be gone (e.g. an earlier write failure); closing
+    # must never mask the guest's exit code (finalize calls us).
+    warn "Session log close failed", error = ex.msg
   r.logger.enabled = false
   r.logger.sectionOpen = false
-  info "Logging stopped"
 
 proc captureToSessionLog(r: var Runner, kind: FdKind, data: pointer, len: int) =
   ## Records bytes actually DELIVERED to the destination (uniform for all
   ## three directions).  Capture-only: never touches the stream itself.
+  ## Every file op is guarded: logging is subordinate to proxying (S5.1) —
+  ## a full disk must never kill the proxy loop.
   if not r.logger.enabled or len <= 0:
     return
-  if not r.logger.sectionOpen or r.logger.currentSection != kind:
-    writeLine(r.logger.file, "\n" & sectionLabel(kind) & ":\n" & repeat('-', 80))
-    r.logger.currentSection = kind
-    r.logger.sectionOpen = true
-  discard writeBuffer(r.logger.file, data, len)
-  flushFile(r.logger.file)
+  try:
+    if not r.logger.sectionOpen or r.logger.currentSection != kind:
+      writeLine(r.logger.file, "\n" & sectionLabel(kind) & ":\n" & repeat('-', 80))
+      r.logger.currentSection = kind
+      r.logger.sectionOpen = true
+    let written = writeBuffer(r.logger.file, data, len)
+    if written < len:
+      warn "Session log short write", wanted = len, written = written
+    flushFile(r.logger.file)
+  except CatchableError as ex:
+    warn "Session log write failed, disabling logger", error = ex.msg
+    closeLogger(r)
 
 # -----------------------------------------------------------------------------
 # Pipes & spawn
@@ -442,22 +471,22 @@ proc spawnGuest(cfg: Config, pipes: var PipeSet): Pid =
     closeFd(pipes[fkStdin].w)
     closeFd(pipes[fkStdout].r)
     closeFd(pipes[fkStderr].r)
-    if posix.dup2(pipes[fkStdin].r, 0) < 0: quit(126)
-    if posix.dup2(pipes[fkStdout].w, 1) < 0: quit(126)
-    if posix.dup2(pipes[fkStderr].w, 2) < 0: quit(126)
+    if posix.dup2(pipes[fkStdin].r, 0) < 0: posix.exitnow(126)
+    if posix.dup2(pipes[fkStdout].w, 1) < 0: posix.exitnow(126)
+    if posix.dup2(pipes[fkStderr].w, 2) < 0: posix.exitnow(126)
     closeFd(pipes[fkStdin].r)
     closeFd(pipes[fkStdout].w)
     closeFd(pipes[fkStderr].w)
 
     if posix.chdir(cstring(cfg.cwd)) != 0:
       stderr.writeLine("subrun: failed to chdir to " & cfg.cwd)
-      quit(126)
+      posix.exitnow(126)
 
     setPdeathsig()
 
     discard posix.execve(cstring(cfg.binary), argv, envp)
     stderr.writeLine("subrun: execve failed for " & cfg.binary & ": " & $strerror(errno))
-    quit(126)
+    posix.exitnow(126)
   else:
     # Two-sided setpgid: closes the race of forwarding kill(-pid) before the
     # guest's own setpgid lands (idempotent; EACCES/ESRCH are harmless here).
@@ -506,8 +535,6 @@ proc reapGuest(r: var Runner) =
   while true:
     let ret = waitpid(r.guestPid, status, WNOHANG)
     if ret > 0:
-      if r.guestExited:
-        return
       r.lastStatus = status
       r.guestExited = true
       if WIFEXITED(status):
@@ -532,14 +559,21 @@ proc reapGuest(r: var Runner) =
     if errno == ECHILD:
       if r.guestExited:
         return                    # late SIGCHLD flag; zombie already consumed
-      # Unreachable by design (only we ever reap our guest).  Leaving
-      # guestExited=false here would hang the loop forever (exit invariant
-      # unreachable), so fail safe and loud (review delta 19.3/L4).
-      error "waitpid: ECHILD with live guest flag — treating as give-up"
+      # The guest is not in our reap table (consumed elsewhere, e.g. a ptrace
+      # tracer) — it may STILL BE RUNNING. The kill contract is by process
+      # GROUP, not by our waitpid handle: escalate to SIGKILL before giving
+      # up on reaping, so the dying guest closes the pipes and the exit
+      # invariant stays reachable.
+      error "waitpid: ECHILD — guest untraceable, SIGKILL to group, fate unknown"
+      signalGuestGroup(r, SIGKILL)
       r.guestExited = true
-      r.gaveUp = true             # finalize: exit 1, lastStatus never read
+      r.reapFailed = true         # finalize: exit 1, lastStatus never read
       return
-    error "waitpid failed", error = $strerror(errno)
+    error "waitpid failed — guest state unknown, it may still be running",
+          error = $strerror(errno)
+    signalGuestGroup(r, SIGKILL)
+    r.guestExited = true
+    r.reapFailed = true     # mirror the ECHILD path: fail loud, exit 1
     return
 
 proc beginShutdown(r: var Runner, src: ShutdownSource) =
@@ -563,17 +597,20 @@ proc beginShutdown(r: var Runner, src: ShutdownSource) =
     signalGuestGroup(r, r.cfg.signal)
 
 proc tickEscalation(r: var Runner) =
-  ## V2 timeline.  Group signals only while the guest lives; the hard-timeout
-  ## give-up runs ALWAYS — including the drain phase — so a stalled drain
-  ## after a deadly signal is still bounded (traversal delta, stage 18).
+  ## V3 timeline. Stage deadlines on the shutdown clock, all from
+  ## shutdownStart; --hard-timeout is RELATIVE to grace expiry
+  ## (grace=20, hard=10 → TERM#2 at t20, SIGKILL at t30). Signals fire only
+  ## while the guest lives; the wrapper never gives up — it kills the group.
   let elapsedSec = float(inMilliseconds(getMonoTime() - r.shutdownStart)) / 1000.0
-  if not r.guestExited and not r.sigkillSent and elapsedSec >= r.cfg.graceTimeout:
-    warn "Grace timeout expired, escalating to SIGKILL"
+  if not r.guestExited and not r.termSent and elapsedSec >= r.cfg.graceTimeout:
+    info "Grace expired, sending SIGTERM"
+    signalGuestGroup(r, SIGTERM)
+    r.termSent = true
+  if not r.guestExited and not r.sigkillSent and
+     elapsedSec >= r.cfg.graceTimeout + r.cfg.hardTimeout:
+    warn "Hard deadline reached, sending SIGKILL"
     signalGuestGroup(r, SIGKILL)
     r.sigkillSent = true
-  if elapsedSec >= r.cfg.hardTimeout:
-    error "Hard timeout: giving up (bounded exit, guest may survive)"
-    r.gaveUp = true
 
 proc checkHostAlive(r: var Runner) =
   ## Reparenting detection: a dead host means we get reparented (to
@@ -621,9 +658,8 @@ proc drainSignals(r: var Runner) =
         forwardSignal(r, s)
     elif s == SIGTSTP or s == SIGTTIN or s == SIGTTOU:
       jobControlStop(r, s)
-    elif s == SIGCONT:
-      forwardSignal(r, s)
     else:
+      # SIGCONT lands here too: forward + no shutdown (not in DeadlySignals).
       forwardSignal(r, s)
       if s in DeadlySignals:
         beginShutdown(r, shsForwardedSignal)
@@ -642,7 +678,7 @@ proc appendCompact(s: var Stream, data: pointer, len: int) =
     s.buf.setLen(0)
     s.readOff = 0
   elif s.readOff >= 65536:
-    copyMem(addr s.buf[0], addr s.buf[s.readOff], s.buf.len - s.readOff)
+    moveMem(addr s.buf[0], addr s.buf[s.readOff], s.buf.len - s.readOff)
     s.buf.setLen(s.buf.len - s.readOff)
     s.readOff = 0
   let oldLen = s.buf.len
@@ -816,9 +852,10 @@ proc cadence(r: Runner): cint =
   else:
     ms = PollMsActive
   if r.cfg.timeout > 0:
-    let remainMs = int(r.cfg.timeout * 1000.0) -
-                   int(inMilliseconds(getMonoTime() - r.startTime))
-    ms = min(ms, cint(max(remainMs, 1)))
+    let remainMs = min(r.cfg.timeout * 1000.0 -
+                       float(inMilliseconds(getMonoTime() - r.startTime)),
+                       float(PollMsMax))
+    ms = min(ms, cint(max(int(remainMs), 1)))
   return ms
 
 # -----------------------------------------------------------------------------
@@ -826,14 +863,19 @@ proc cadence(r: Runner): cint =
 # -----------------------------------------------------------------------------
 
 proc finalize(r: var Runner): int =
-  ## No waitpid here — the guest is already reaped by the loop (or
-  ## deliberately abandoned on the give-up path).  Never blocks (H2 dead).
+  ## No waitpid here — the guest is already reaped by the loop (or the reap
+  ## itself failed: guestStateUnknown → exit 1, never a guessed code).
+  ## Never blocks (H2 dead).
   closeLogger(r)
   for kind in FdKind:
     if r.streams[kind].state != ssClosed:
       closeDirection(r, kind)
-  if r.gaveUp or not r.guestExited:
-    return 1                        # S2.2: never invent a guest code
+  if r.reapFailed or not r.guestExited:
+    # reapFailed: waitpid error — the guest's fate is unknown, never invent
+    # a code (S2.2). not r.guestExited is unreachable today (the loop only
+    # breaks at the exit invariant) and stays as a guard against a future
+    # break path reading an uninitialized lastStatus.
+    return 1
   let status = r.lastStatus
   if WIFEXITED(status):
     return int(WEXITSTATUS(status))
@@ -872,8 +914,6 @@ proc runLoop(r: var Runner, pipes: PipeSet): int =
 
     if r.shutdown != shsNone:
       tickEscalation(r)
-      if r.gaveUp:
-        break
     else:
       checkHostAlive(r)
       checkTimeout(r)
@@ -924,7 +964,8 @@ proc run(
   ##
   ## Examples:
   ##   subrun -- /usr/bin/node /path/to/mcp-server.js
-  ##   subrun --grace-timeout 3 --hard-timeout 8 -- /usr/local/bin/my-server
+  ##   subrun --grace-timeout 5 --hard-timeout 5 -- /usr/local/bin/my-server
+  ##   (TERM#2 at 5s, SIGKILL to the group at 10s — hard is relative to grace)
   ##   subrun --cwd /project/dir -- .venv/bin/python -m mcp_server
 
   # Crash-loud startup (E1): everything validates before anything spawns.
@@ -936,8 +977,14 @@ proc run(
     stderr.writeLine("subrun: --mcp requires --tort (payload encoding is Tort-only)")
     return 2
 
-  if timeout < 0:
-    stderr.writeLine("subrun: --timeout must be >= 0")
+  if timeout < 0 or timeout != timeout or timeout == Inf:
+    stderr.writeLine("subrun: --timeout must be a finite number >= 0")
+    return 2
+
+  if graceTimeout < 0 or graceTimeout != graceTimeout or
+     graceTimeout == Inf or
+     hardTimeout < 0 or hardTimeout != hardTimeout or hardTimeout == Inf:
+    stderr.writeLine("subrun: --grace-timeout and --hard-timeout must be finite numbers >= 0")
     return 2
 
   var gracefulSig: cint
@@ -978,8 +1025,8 @@ proc run(
     oneWay: oneWay,
   )
   if not dirExists(cfg.cwd):
-    error "CWD does not exist", cwd = cfg.cwd
-    return 1
+    stderr.writeLine("subrun: --cwd does not exist: " & cfg.cwd)
+    return 2
 
   setProcessTitle(if cfg.title.len > 0: cfg.title
                   else: extractFilename(paramStr(0)) & "[" &
@@ -1039,8 +1086,8 @@ proc run(
 
 const
   HelpTable = {
-    "graceTimeout": "Timeout for graceful shutdown (SIGTERM) before SIGKILL escalation",
-    "hardTimeout": "Timeout for bounded give-up, from shutdown start",
+    "graceTimeout": "Seconds to wait for the guest's reaction to the initial --signal; on expiry SIGTERM is sent to the group (default 5)",
+    "hardTimeout": "Seconds AFTER grace expiry to wait before SIGKILL to the guest group; relative, not absolute (default 5)",
     "timeout": "Max guest lifetime in seconds; on expiry the graceful shutdown policy applies (0 = unlimited, default)",
     "signal": "Graceful signal for wrapper-initiated shutdown: name (TERM, SIGHUP) or number 1..31; default SIGTERM",
     "cwd": "Working directory (default: caller's current directory)",
@@ -1082,3 +1129,9 @@ when isMainModule and not defined(subrunTesting):
     quit(0)
   except ParseError:
     quit(2)
+  except CatchableError as ex:
+    # Defense in depth (E2): an unexpected CatchableError gets the
+    # conventional exit 1 instead of a raw unhandled-exception dump.
+    # Defects are NOT covered: with panics:on they panic by design.
+    stderr.writeLine("subrun: internal error: " & ex.msg)
+    quit(1)

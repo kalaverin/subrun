@@ -176,3 +176,49 @@ suite "e2e: subrun proxy":
       skip()
     let (_, c) = run(SubrunBin, ["--title", "mytitle", "--", "/bin/sh", "-c", "exit 0"])
     check c == 0
+
+  test "T11: invalid shutdown timeout values rejected at startup":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c1) = run(SubrunBin, ["--grace-timeout", "-1", "--", "/bin/sh", "-c", "exit 0"])
+    check c1 == 2
+    let (_, c2) = run(SubrunBin, ["--hard-timeout", "-1", "--", "/bin/sh", "-c", "exit 0"])
+    check c2 == 2
+    for bad in ["nan", "inf"]:
+      let (_, c3) = run(SubrunBin, ["--timeout", bad, "--", "/bin/sh", "-c", "exit 0"])
+      check c3 == 2
+      let (_, c4) = run(SubrunBin, ["--grace-timeout", bad, "--", "/bin/sh", "-c", "exit 0"])
+      check c4 == 2
+
+  test "T12: shutdown sends the initial signal, then SIGTERM again at grace expiry (V3)":
+    ## Guest counts TERM deliveries and exits 0 only on the SECOND one —
+    ## proves both the t0 --signal and the grace-expiry SIGTERM stage.
+    if not fileExists(SubrunBin):
+      skip()
+    let script = "n=0; trap 'n=$((n+1)); [ $n -ge 2 ] && exit 0' TERM; " &
+                 "while :; do sleep 0.1; done"
+    let (_, c) = run(SubrunBin, ["--timeout", "0.3", "--grace-timeout", "1",
+                                 "--hard-timeout", "30", "--",
+                                 "/bin/sh", "-c", script])
+    check c == 0
+
+  test "T15: SIGKILL fires at grace+hard (relative), not at hard alone (V3)":
+    ## Guest ignores TERM; with grace=1 hard=1 a relative hard means SIGKILL
+    ## at ~t0+2s — an absolute reading would kill at ~t0+1s.
+    if not fileExists(SubrunBin):
+      skip()
+    let script = "trap '' TERM; while :; do sleep 0.1; done"
+    let t0 = epochTime()
+    let (_, c) = run(SubrunBin, ["--timeout", "0.2", "--grace-timeout", "1",
+                                 "--hard-timeout", "1", "--",
+                                 "/bin/sh", "-c", script])
+    let dt = epochTime() - t0
+    check c == 137
+    check dt >= 1.8 and dt < 6.0
+
+  test "T13: nonexistent --cwd is a usage error (exit 2)":
+    if not fileExists(SubrunBin):
+      skip()
+    let (_, c) = run(SubrunBin, ["--cwd", "/nonexistent-subrun-dir", "--",
+                                 "/bin/sh", "-c", "exit 0"])
+    check c == 2

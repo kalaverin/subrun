@@ -65,4 +65,9 @@
 #   ok: +
 #
 # If you need the exact byte-level grammar, ask for the Tort v0.1.8 spec.
+#
+# ENVELOPE NOTE (MCP proxy): tools/list responses in this stream have
+# `outputSchema` stripped from every tool, and `structuredContent` is dropped
+# wherever a `content` array is present (deduplication against the Tort
+# payload). The JSON-RPC envelope itself is untouched.
 # ── END PREAMBLE ────────────────────────────────────────────────────────
