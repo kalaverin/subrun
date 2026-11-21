@@ -9,6 +9,14 @@ import unittest2
 import std/[monotimes, posix]
 include ../src/subrun
 
+# Readback helpers for the setProcessTitle unit test (mirrors the app's FFI).
+when defined(macosx):
+  proc pthreadSelf(): pointer {.importc: "pthread_self", header: "<pthread.h>".}
+  proc pthreadGetName(thread: pointer, name: cstring, len: int): cint {.importc: "pthread_getname_np", header: "<pthread.h>".}
+when defined(linux):
+  const PR_GET_NAME = 16
+  proc prctlGetName(option: cint, name: cstring): cint {.importc: "prctl", header: "<sys/prctl.h>".}
+
 suite "timeout: parseSignal":
   test "accepts names, any case, SIG prefix, surrounding whitespace":
     check parseSignal("TERM") == SIGTERM
@@ -66,6 +74,18 @@ suite "timeout: checkTimeout":
     r.startTime = getMonoTime()
     checkTimeout(r)
     check r.shutdown == shsNone
+
+suite "title: setProcessTitle":
+  test "applies the name and reads it back":
+    setProcessTitle("torttitle1")
+    when defined(macosx):
+      var buf: array[64, char]
+      check pthreadGetName(pthreadSelf(), cast[cstring](addr buf), buf.sizeof) == 0
+      check $cast[cstring](addr buf) == "torttitle1"
+    else:
+      var buf: array[16, char]
+      check prctlGetName(PR_GET_NAME, cast[cstring](addr buf)) == 0
+      check $cast[cstring](addr buf) == "torttitle1"
 
 suite "timeout: cadence":
   test "disarmed timeout leaves cadence untouched":
