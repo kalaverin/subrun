@@ -749,11 +749,16 @@ proc tryFlush(r: var Runner, kind: FdKind) =
       closeDirection(r, kind)
       return
   if s.state == ssDraining and pending(s[]) == 0:
-    # EOF timing fidelity (S1.3): for outputs dstFd is our own fd 1/2 —
-    # closing it gives the host an immediate EOF, not one deferred to exit.
+    # EOF timing (S1.3) applies to stdout: closing our own fd 1 gives the
+    # host an immediate EOF, not one deferred to exit. Stderr is the log
+    # channel: its fd 2 stays open until process exit (owner ruling, S1.3
+    # stderr carve-out) so final-phase logs — Guest exited, Wrapper exiting —
+    # survive instead of being written into a closed fd; the host's stderr
+    # EOF arrives at exit, milliseconds later.
     info "Output drained", fd = $kind
-    closeHostFd(s.dstFd)
-    s.dstFd = -1
+    if kind == fkStdout:
+      closeHostFd(s.dstFd)
+      s.dstFd = -1
     s.state = ssClosed
 
 proc onSourceEof(r: var Runner, kind: FdKind) =
