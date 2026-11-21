@@ -4,6 +4,11 @@ when withDir(thisDir(), system.fileExists("nimble.paths")):
   include "nimble.paths"
 # end Nimble config
 
+# The vendored chronicles sink (src/subrun_textlines.nim) is referenced by
+# name in the logStream macro; macro-generated imports resolve via --path
+# only (not relative to the importing file), so src/ must be on it.
+switch("path", thisDir() & "/src")
+
 switch("define", "release")
 switch("assertions", "on")    # unittest2 baseline + cheap internal invariants
 switch("panics", "on")

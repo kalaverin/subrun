@@ -10,11 +10,16 @@ import
   pkg/chronicles,
   pkg/cligen,
   tort/tort,
-  subrun_mcp
+  subrun_mcp,
+  subrun_textlines
 
 # All wrapper logs go to stderr — stdout is the guest's data channel
 # (MCP JSON-RPC), it must stay clean (S1.5, J4).
-logStream wrapperLog[textlines[stderr]]
+# The sink is a vendored chronicles textlines format (src/subrun_textlines.nim):
+# identical output, but its RFC timestamp uses gettimeofday instead of
+# chronicles' hardcoded CLOCK_REALTIME_COARSE=5 (CLOCK_UPTIME on FreeBSD —
+# the 1970-01-06 prod bug). One format on every platform.
+logStream wrapperLog[subrun_textlines[stderr]]
 
 logScope:
   stream = wrapperLog
